@@ -3954,6 +3954,7 @@ def execute_action(action, root, mic_callback, app=None):
                 f"Could not change volume: "
                 f"{exc}"
             )
+        
 
     if name in (
         "lock_pc",

@@ -20,7 +20,6 @@ import uuid
 import pyautogui
 import ctypes
 import pyperclip
-import uuid
 import re
 from datetime import datetime
 from pathlib import Path
@@ -32,3 +31,8 @@ import requests
 import unicodedata
 import sounddevice as sd
 from pycaw.pycaw import AudioUtilities
+import ipaddress
+import socket
+from urllib.parse import quote_plus
+from urllib.parse import urlparse
+from playwright.sync_api import sync_playwright

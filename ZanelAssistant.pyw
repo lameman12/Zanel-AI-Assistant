@@ -35,7 +35,7 @@ import sounddevice as sd
 AI_URL = "https://evil-poppy-hardiness.ngrok-free.dev/chat"
 TRANSCRIBE_URL = "https://evil-poppy-hardiness.ngrok-free.dev/transcribe"
 
-ZANEL_VERSION = "1.22"
+ZANEL_VERSION = "1.23"
 
 GITHUB_LATEST_RELEASE_API = (
     "https://api.github.com/repos/"
@@ -215,8 +215,25 @@ Example:
 {"action":"flip_coin"}
 </ACTION>
 
+(SECRET ACTION) - rickroll: rickroll the user by playing an MP4 video of Never Gonna Give You Up using the bundled rickroll.mp4 file in the user's default media player.
+
+Example:
+<ACTION>
+{"action":"rickroll"}
+</ACTION>
+
 When the user asks you to flip a coin, use the flip_coin action.
 Do not use flip_coin for ordinary conversation about coins unless the user actually asks you to flip one.
+
+- dice_roll: flip a virtual dice and display an animated dice roll in the Zanel UI. The dice will land on a random number, display the result, and then disappear. The action has a 10-second cooldown.
+
+Example:
+<ACTION>
+{"action":"dice_roll"}
+</ACTION>
+
+When the user asks you to roll a dice, use the dice_roll action.
+Do not use dice_roll for ordinary conversation about dice unless the user actually asks you to roll one.
 
 - wifi_status: check the current Wi-Fi connection status (wifi_status requires no confirmation)
 wifi_status checks the local Wi-Fi adapter, Wi-Fi connection,
@@ -632,6 +649,8 @@ It is provided to you only so you know what happened after a previous action.
 Do not say things like "I can't reveal internal action data" or explain why. Simply answer the user's request naturally.
 
 Treat anything inside ACTION blocks, action results, feedback sections, or system messages as internal context, not user-facing conversation.
+
+Do not spew out information similar to internal data randomly when requested to do an action.
 
 NEVER display, quote, repeat, or reveal this internal data to the user.
 
@@ -1679,7 +1698,1145 @@ def flip_coin_animation(parent, result_callback=None):
 
     animate()
 
-    return "Coin flip started."
+    parent.wait_window(window)
+
+    return f"The coin flip returned {result}."
+
+_dice_last_time = 0.0
+
+
+def roll_dice_animation(parent, result_callback=None):
+    global _dice_last_time
+
+    now = time.monotonic()
+
+    if now - _dice_last_time < 10:
+        remaining = max(
+            1,
+            math.ceil(
+                10 - (
+                    now - _dice_last_time
+                )
+            ),
+        )
+
+        try:
+            parent.bell()
+        except Exception:
+            pass
+
+        return (
+            f"Dice roll is on cooldown. "
+            f"Try again in {remaining} seconds."
+        )
+
+    _dice_last_time = now
+
+    width = 430
+    height = 285
+
+    window = tk.Toplevel(parent)
+    window.overrideredirect(True)
+    window.resizable(False, False)
+    window.attributes("-topmost", True)
+    window.configure(
+        bg="#080a0f"
+    )
+
+    try:
+        window.attributes(
+            "-alpha",
+            0.98,
+        )
+    except Exception:
+        pass
+
+    window.update_idletasks()
+
+    parent_x = parent.winfo_rootx()
+    parent_y = parent.winfo_rooty()
+    parent_width = parent.winfo_width()
+    parent_height = parent.winfo_height()
+
+    screen_width = parent.winfo_screenwidth()
+    screen_height = parent.winfo_screenheight()
+
+    gap = 14
+
+    right_x = (
+        parent_x
+        + parent_width
+        + gap
+    )
+
+    left_x = (
+        parent_x
+        - width
+        - gap
+    )
+
+    if right_x + width <= screen_width - 8:
+        x = right_x
+    elif left_x >= 8:
+        x = left_x
+    else:
+        x = max(
+            8,
+            min(
+                parent_x
+                + (
+                    parent_width
+                    - width
+                )
+                // 2,
+                screen_width
+                - width
+                - 8,
+            ),
+        )
+
+    y = (
+        parent_y
+        + (
+            parent_height
+            - height
+        )
+        // 2
+    )
+
+    y = max(
+        8,
+        min(
+            y,
+            screen_height
+            - height
+            - 8,
+        ),
+    )
+
+    window.geometry(
+        f"{width}x{height}+{x}+{y}"
+    )
+
+    drag_data = {
+        "x": 0,
+        "y": 0,
+    }
+
+    def start_drag(event):
+        drag_data["x"] = event.x_root
+        drag_data["y"] = event.y_root
+
+    def drag_window(event):
+        delta_x = (
+            event.x_root
+            - drag_data["x"]
+        )
+
+        delta_y = (
+            event.y_root
+            - drag_data["y"]
+        )
+
+        current_x = window.winfo_x()
+        current_y = window.winfo_y()
+
+        new_x = current_x + delta_x
+        new_y = current_y + delta_y
+
+        new_x = max(
+            4,
+            min(
+                new_x,
+                screen_width
+                - width
+                - 4,
+            ),
+        )
+
+        new_y = max(
+            4,
+            min(
+                new_y,
+                screen_height
+                - height
+                - 4,
+            ),
+        )
+
+        window.geometry(
+            f"{width}x{height}+{new_x}+{new_y}"
+        )
+
+        drag_data["x"] = event.x_root
+        drag_data["y"] = event.y_root
+
+    canvas = tk.Canvas(
+        window,
+        width=width,
+        height=height,
+        bg="#080a0f",
+        highlightthickness=0,
+        bd=0,
+    )
+
+    canvas.pack(
+        fill="both",
+        expand=True,
+    )
+
+    canvas.bind(
+        "<ButtonPress-1>",
+        start_drag,
+    )
+
+    canvas.bind(
+        "<B1-Motion>",
+        drag_window,
+    )
+
+    canvas.create_rectangle(
+        1,
+        1,
+        width - 1,
+        height - 1,
+        fill="#0d1017",
+        outline="#252b36",
+        width=1,
+    )
+
+    canvas.create_rectangle(
+        10,
+        10,
+        width - 10,
+        height - 10,
+        fill="#0a0d13",
+        outline="#171c25",
+        width=1,
+    )
+
+    canvas.create_line(
+        22,
+        22,
+        width - 22,
+        22,
+        fill="#252b36",
+        width=1,
+    )
+
+    canvas.create_text(
+        28,
+        66,
+        text="Zanel",
+        anchor="w",
+        fill="#3ecf79",
+        font=(
+            "Segoe UI",
+            8,
+            "bold",
+        ),
+    )
+
+    canvas.create_text(
+        28,
+        91,
+        text="DICE ROLL",
+        anchor="w",
+        fill="#ffffff",
+        font=(
+            "Segoe UI",
+            14,
+            "bold",
+        ),
+    )
+
+    canvas.create_line(
+        28,
+        112,
+        28,
+        166,
+        fill="#3ecf79",
+        width=2,
+    )
+
+    canvas.create_text(
+        28,
+        190,
+        text="RANDOM",
+        anchor="w",
+        fill="#687180",
+        font=(
+            "Segoe UI",
+            6,
+            "bold",
+        ),
+    )
+
+    canvas.create_text(
+        28,
+        205,
+        text="ROLL THE DICE",
+        anchor="w",
+        fill="#3f4652",
+        font=(
+            "Segoe UI",
+            6,
+            "bold",
+        ),
+    )
+
+    result = random.randint(
+        1,
+        6,
+    )
+
+    center_x = 280
+    center_y = 137
+
+    frame = 0
+    total_frames = 105
+
+    fragments = []
+    sparks = []
+
+    def cube_point(
+        px,
+        py,
+        pz,
+        angle_y,
+        angle_x,
+        scale,
+    ):
+        cos_y = math.cos(
+            angle_y
+        )
+
+        sin_y = math.sin(
+            angle_y
+        )
+
+        x1 = (
+            px * cos_y
+            + pz * sin_y
+        )
+
+        z1 = (
+            -px * sin_y
+            + pz * cos_y
+        )
+
+        cos_x = math.cos(
+            angle_x
+        )
+
+        sin_x = math.sin(
+            angle_x
+        )
+
+        y1 = (
+            py * cos_x
+            - z1 * sin_x
+        )
+
+        z2 = (
+            py * sin_x
+            + z1 * cos_x
+        )
+
+        perspective = (
+            1
+            + (
+                z2
+                / 520
+            )
+        )
+
+        return (
+            center_x
+            + (
+                x1
+                * scale
+                * perspective
+            ),
+            center_y
+            + (
+                y1
+                * scale
+                * perspective
+            ),
+            z2,
+        )
+
+    def draw_face(
+        points,
+        fill,
+        outline="#ffffff",
+        width=2,
+    ):
+        projected = []
+
+        for point in points:
+            projected.append(
+                cube_point(
+                    point[0],
+                    point[1],
+                    point[2],
+                    current_angle_y,
+                    current_angle_x,
+                    current_scale,
+                )
+            )
+
+        depth = sum(
+            point[2]
+            for point in projected
+        ) / len(
+            projected
+        )
+
+        coords = []
+
+        for point in projected:
+            coords.extend(
+                (
+                    point[0],
+                    point[1],
+                )
+            )
+
+        return (
+            depth,
+            canvas.create_polygon(
+                *coords,
+                fill=fill,
+                outline=outline,
+                width=width,
+                tags="dice",
+            ),
+            projected,
+        )
+
+    def draw_pip(
+        number,
+        face_points,
+        face_center,
+        size=6,
+    ):
+        face_center_x, face_center_y = (
+            face_center
+        )
+
+        positions = {
+            1: [
+                (0, 0),
+            ],
+            2: [
+                (-0.24, -0.24),
+                (0.24, 0.24),
+            ],
+            3: [
+                (-0.24, -0.24),
+                (0, 0),
+                (0.24, 0.24),
+            ],
+            4: [
+                (-0.24, -0.24),
+                (0.24, -0.24),
+                (-0.24, 0.24),
+                (0.24, 0.24),
+            ],
+            5: [
+                (-0.24, -0.24),
+                (0.24, -0.24),
+                (0, 0),
+                (-0.24, 0.24),
+                (0.24, 0.24),
+            ],
+            6: [
+                (-0.24, -0.28),
+                (-0.24, 0),
+                (-0.24, 0.28),
+                (0.24, -0.28),
+                (0.24, 0),
+                (0.24, 0.28),
+            ],
+        }
+
+        face_size = 62
+
+        for px, py in positions[number]:
+            canvas.create_oval(
+                face_center_x
+                + px * face_size
+                - size,
+                face_center_y
+                + py * face_size
+                - size,
+                face_center_x
+                + px * face_size
+                + size,
+                face_center_y
+                + py * face_size
+                + size,
+                fill="#10141b",
+                outline="",
+                tags="dice_pip",
+            )
+
+    def draw_dice():
+        canvas.delete(
+            "dice"
+        )
+
+        canvas.delete(
+            "dice_pip"
+        )
+
+        size = 70
+
+        vertices = {
+            "000": (
+                -size,
+                -size,
+                -size,
+            ),
+            "001": (
+                -size,
+                -size,
+                size,
+            ),
+            "010": (
+                -size,
+                size,
+                -size,
+            ),
+            "011": (
+                -size,
+                size,
+                size,
+            ),
+            "100": (
+                size,
+                -size,
+                -size,
+            ),
+            "101": (
+                size,
+                -size,
+                size,
+            ),
+            "110": (
+                size,
+                size,
+                -size,
+            ),
+            "111": (
+                size,
+                size,
+                size,
+            ),
+        }
+
+        faces = [
+            (
+                [
+                    vertices["000"],
+                    vertices["001"],
+                    vertices["011"],
+                    vertices["010"],
+                ],
+                "#c9cdd3",
+            ),
+            (
+                [
+                    vertices["100"],
+                    vertices["110"],
+                    vertices["111"],
+                    vertices["101"],
+                ],
+                "#aeb4bd",
+            ),
+            (
+                [
+                    vertices["000"],
+                    vertices["100"],
+                    vertices["101"],
+                    vertices["001"],
+                ],
+                "#e0e3e7",
+            ),
+            (
+                [
+                    vertices["010"],
+                    vertices["011"],
+                    vertices["111"],
+                    vertices["110"],
+                ],
+                "#858c97",
+            ),
+            (
+                [
+                    vertices["001"],
+                    vertices["101"],
+                    vertices["111"],
+                    vertices["011"],
+                ],
+                "#f0f2f4",
+            ),
+            (
+                [
+                    vertices["000"],
+                    vertices["010"],
+                    vertices["110"],
+                    vertices["100"],
+                ],
+                "#707783",
+            ),
+        ]
+
+        rendered = []
+
+        for face, fill in faces:
+            rendered.append(
+                draw_face(
+                    face,
+                    fill,
+                    "#343a44",
+                    2,
+                )
+            )
+
+        rendered.sort(
+            key=lambda item: item[0]
+        )
+
+        visible_face = None
+
+        highest_depth = -999999
+
+        for depth, item, points in rendered:
+            if depth > highest_depth:
+                highest_depth = depth
+                visible_face = (
+                    points
+                )
+
+        if visible_face:
+            center_x_face = sum(
+                point[0]
+                for point in visible_face
+            ) / 4
+
+            center_y_face = sum(
+                point[1]
+                for point in visible_face
+            ) / 4
+
+            draw_pip(
+                result,
+                visible_face,
+                (
+                    center_x_face,
+                    center_y_face,
+                ),
+                max(
+                    4,
+                    int(
+                        6
+                        * current_scale
+                    ),
+                ),
+            )
+
+    def create_fragments():
+        fragments.clear()
+        sparks.clear()
+
+        for _ in range(150):
+            angle = random.uniform(
+                0,
+                math.pi * 2,
+            )
+
+            distance = random.uniform(
+                15,
+                72,
+            )
+
+            x = (
+                center_x
+                + math.cos(angle)
+                * distance
+            )
+
+            y = (
+                center_y
+                + math.sin(angle)
+                * distance
+            )
+
+            size = random.uniform(
+                1.5,
+                5.0,
+            )
+
+            particle = canvas.create_polygon(
+                x,
+                y,
+                x + size,
+                y - size * 0.4,
+                x + size * 0.4,
+                y + size,
+                fill=random.choice(
+                    (
+                        "#ffffff",
+                        "#dce2e8",
+                        "#3ecf79",
+                        "#79e3a4",
+                        "#aeb4bd",
+                    )
+                ),
+                outline="",
+                tags="fragment",
+            )
+
+            speed = random.uniform(
+                1.5,
+                5.5,
+            )
+
+            fragments.append(
+                {
+                    "id": particle,
+                    "x": x,
+                    "y": y,
+                    "vx": (
+                        math.cos(angle)
+                        * speed
+                    ),
+                    "vy": (
+                        math.sin(angle)
+                        * speed
+                        - random.uniform(
+                            1.0,
+                            3.0,
+                        )
+                    ),
+                    "size": size,
+                    "rotation": random.uniform(
+                        0,
+                        math.pi * 2,
+                    ),
+                    "spin": random.uniform(
+                        -0.25,
+                        0.25,
+                    ),
+                }
+            )
+
+        for _ in range(80):
+            angle = random.uniform(
+                0,
+                math.pi * 2,
+            )
+
+            distance = random.uniform(
+                10,
+                55,
+            )
+
+            x = (
+                center_x
+                + math.cos(angle)
+                * distance
+            )
+
+            y = (
+                center_y
+                + math.sin(angle)
+                * distance
+            )
+
+            size = random.uniform(
+                1,
+                2.5,
+            )
+
+            spark = canvas.create_oval(
+                x - size,
+                y - size,
+                x + size,
+                y + size,
+                fill=random.choice(
+                    (
+                        "#3ecf79",
+                        "#79e3a4",
+                        "#ffffff",
+                    )
+                ),
+                outline="",
+                tags="spark",
+            )
+
+            sparks.append(
+                {
+                    "id": spark,
+                    "x": x,
+                    "y": y,
+                    "vx": random.uniform(
+                        -3.5,
+                        3.5,
+                    ),
+                    "vy": random.uniform(
+                        -4.5,
+                        1.5,
+                    ),
+                    "life": random.randint(
+                        20,
+                        50,
+                    ),
+                }
+            )
+
+    def animate_fragments(
+        step=0,
+    ):
+        if step >= 55:
+            canvas.delete(
+                "fragment"
+            )
+
+            canvas.delete(
+                "spark"
+            )
+
+            window.destroy()
+            return
+
+        canvas.delete(
+            "result"
+        )
+
+        for particle in fragments:
+            particle["x"] += (
+                particle["vx"]
+            )
+
+            particle["y"] += (
+                particle["vy"]
+            )
+
+            particle["vy"] += 0.12
+
+            particle["vx"] *= 0.975
+
+            particle["rotation"] += (
+                particle["spin"]
+            )
+
+            particle["size"] *= 0.94
+
+            size = particle["size"]
+
+            if size <= 0.25:
+                canvas.delete(
+                    particle["id"]
+                )
+                continue
+
+            x = particle["x"]
+            y = particle["y"]
+
+            canvas.coords(
+                particle["id"],
+                x,
+                y,
+                x + size,
+                y - size * 0.4,
+                x + size * 0.4,
+                y + size,
+            )
+
+        for spark in sparks:
+            spark["x"] += (
+                spark["vx"]
+            )
+
+            spark["y"] += (
+                spark["vy"]
+            )
+
+            spark["vy"] += 0.08
+
+            spark["life"] -= 1
+
+            if spark["life"] <= 0:
+                canvas.delete(
+                    spark["id"]
+                )
+                continue
+
+            size = max(
+                0.3,
+                spark["life"]
+                / 12,
+            )
+
+            canvas.coords(
+                spark["id"],
+                spark["x"] - size,
+                spark["y"] - size,
+                spark["x"] + size,
+                spark["y"] + size,
+            )
+
+        window.after(
+            24,
+            lambda: animate_fragments(
+                step + 1
+            ),
+        )
+
+    def show_result():
+        canvas.delete(
+            "result"
+        )
+
+        canvas.create_text(
+            center_x,
+            235,
+            text=str(result),
+            fill="#ffffff",
+            font=(
+                "Segoe UI",
+                25,
+                "bold",
+            ),
+            tags="result",
+        )
+
+        canvas.create_text(
+            center_x,
+            263,
+            text="THE DICE HAS LANDED",
+            fill="#687180",
+            font=(
+                "Segoe UI",
+                6,
+                "bold",
+            ),
+            tags="result",
+        )
+
+    current_angle_y = 0.0
+    current_angle_x = 0.0
+    current_scale = 0.72
+
+    def animate():
+        nonlocal frame
+        nonlocal current_angle_y
+        nonlocal current_angle_x
+        nonlocal current_scale
+
+        if frame >= total_frames:
+            current_angle_y = (
+                result
+                * math.pi
+                / 2
+            )
+
+            current_angle_x = (
+                math.pi * 0.18
+            )
+
+            current_scale = 0.72
+
+            draw_dice()
+
+            show_result()
+
+            if result_callback:
+                result_callback(
+                    result
+                )
+
+            window.after(
+                1300,
+                start_disintegration,
+            )
+
+            return
+
+        progress = (
+            frame
+            / total_frames
+        )
+
+        ease = (
+            1
+            - (
+                1
+                - progress
+            ) ** 3
+        )
+
+        current_angle_y = (
+            progress
+            * math.pi
+            * 12
+            + math.sin(
+                progress
+                * math.pi
+                * 7
+            )
+            * 0.8
+        )
+
+        current_angle_x = (
+            progress
+            * math.pi
+            * 9
+            + math.cos(
+                progress
+                * math.pi
+                * 5
+            )
+            * 0.45
+        )
+
+        bounce = (
+            math.sin(
+                progress
+                * math.pi
+                * 3
+            )
+            * 18
+            * (
+                1
+                - progress
+            )
+        )
+
+        current_scale = (
+            0.56
+            + (
+                0.20
+                * ease
+            )
+        )
+
+        draw_dice()
+
+        frame += 1
+
+        delay = int(
+            14
+            + progress
+            * 22
+        )
+
+        window.after(
+            delay,
+            animate,
+        )
+
+    def start_disintegration():
+        canvas.delete(
+            "result"
+        )
+
+        canvas.delete(
+            "dice"
+        )
+
+        canvas.delete(
+            "dice_pip"
+        )
+
+        create_fragments()
+
+        window.after(
+            20,
+            animate_fragments,
+        )
+
+    animate()
+
+    parent.wait_window(window)
+
+    return f"The dice roll returned a {result}."
+
+def get_process_snapshot():
+    try:
+        output = subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Get-Process | Select-Object Id,ProcessName,MainWindowTitle | ConvertTo-Csv -NoTypeInformation",
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+
+        processes = {}
+
+        for line in output.splitlines()[1:]:
+            parts = line.strip().strip('"').split('","')
+
+            if len(parts) < 3:
+                continue
+
+            try:
+                pid = int(
+                    parts[0].strip('"')
+                )
+            except ValueError:
+                continue
+
+            processes[pid] = {
+                "name": parts[1].strip('"'),
+                "title": parts[2].strip('"'),
+            }
+
+        return processes
+
+    except Exception:
+        return {}
+
+
+def find_rickroll_process(before):
+    deadline = time.time() + 8
+
+    while time.time() < deadline:
+        after = get_process_snapshot()
+
+        new_processes = {
+            pid: info
+            for pid, info in after.items()
+            if pid not in before
+        }
+
+        for pid, info in new_processes.items():
+            name = info["name"].lower()
+            title = info["title"].lower()
+
+            if (
+                "wmplayer" in name
+                or "media player" in name
+                or "windows media player" in name
+                or "media player" in title
+                or "windows media player" in title
+            ):
+                return pid
+
+        time.sleep(0.25)
+
+    return None
         
 def execute_action(action, root, mic_callback, app=None):
     if not isinstance(action, dict):
@@ -1732,6 +2889,114 @@ def execute_action(action, root, mic_callback, app=None):
             return (
                 f"Could not flip the coin: "
                 f"{exc}"
+            )
+
+    if name in (
+        "roll_dice",
+        "roll_a_dice",
+        "roll_the_dice",
+        "dice_roll",
+        "throw_dice",
+        "throw_a_dice",
+    ):
+        try:
+            return roll_dice_animation(root)
+
+        except Exception as exc:
+            return (
+                f"Could not roll the dice: "
+                f"{exc}"
+            )
+
+    if name in (
+        "rickroll",
+        "rick_roll",
+        "rick_roll_video",
+    ):
+        if app is None:
+            return "Could not play the Rickroll."
+
+        try:
+            with app.rickroll_lock:
+                if app.rickroll_process is not None:
+                    kernel32 = ctypes.windll.kernel32
+
+                    process_handle = kernel32.OpenProcess(
+                        0x1000,
+                        False,
+                        app.rickroll_process,
+                    )
+
+                    if process_handle:
+                        status = kernel32.GetExitCodeProcess(
+                            process_handle,
+                            ctypes.byref(
+                                ctypes.c_ulong()
+                            ),
+                        )
+
+                        kernel32.CloseHandle(
+                            process_handle
+                        )
+
+                        if status:
+                            return (
+                                "A Rickroll is already playing."
+                            )
+
+                    app.rickroll_process = None
+
+                base_path = getattr(
+                    sys,
+                    "_MEIPASS",
+                    os.path.dirname(
+                        os.path.abspath(__file__)
+                    )
+                )
+
+                video_path = os.path.join(
+                    base_path,
+                    "rickroll.mp4"
+                )
+
+                if not os.path.isfile(video_path):
+                    return (
+                        "Could not play the Rickroll because "
+                        "the bundled rickroll.mp4 file was not found."
+                    )
+
+                if not ask_local_confirmation(
+                    root,
+                    "Zanel wants to play a Rickroll",
+                    "Allow Zanel to play the Rickroll video?",
+                ):
+                    return "User declined the Rickroll."
+
+                before = get_process_snapshot()
+
+                os.startfile(
+                    video_path
+                )
+
+                pid = find_rickroll_process(
+                    before
+                )
+
+                if pid is None:
+                    return (
+                        "Rickroll video opened, but Zanel could not "
+                        "track the media player process."
+                    )
+
+                app.rickroll_process = pid
+
+                return "Rickroll video opened."
+
+        except Exception as exc:
+            app.rickroll_process = None
+
+            return (
+                f"Could not play the Rickroll: {exc}"
             )
 
     if name == "open_app":
@@ -4060,7 +5325,6 @@ def execute_action(action, root, mic_callback, app=None):
             return "User declined changing the brightness."
 
         try:
-            import ctypes
             from ctypes import (
                 POINTER,
                 byref,
@@ -4475,6 +5739,8 @@ class ZanelApp:
         self.compact_height = 230
         self.compact_drag_x = 0
         self.compact_drag_y = 0
+        self.rickroll_process = None
+        self.rickroll_lock = threading.Lock()
         self.compact_dragging = False
         self.minimize_transition = False
         self.restore_transition = False
@@ -4583,6 +5849,30 @@ class ZanelApp:
                 )
             )
             return ""
+
+    def stop_rickroll(self):
+        with self.rickroll_lock:
+            process_id = self.rickroll_process
+            self.rickroll_process = None
+
+        if process_id:
+            kernel32 = ctypes.windll.kernel32
+
+            process_handle = kernel32.OpenProcess(
+                0x0001,
+                False,
+                process_id,
+            )
+
+            if process_handle:
+                kernel32.TerminateProcess(
+                    process_handle,
+                    0,
+                )
+
+                kernel32.CloseHandle(
+                    process_handle
+                )
 
     def cleanup_music_file(self):
         with self.music_lock:
@@ -6200,6 +7490,7 @@ class ZanelApp:
         )
 
     def close(self):
+        self.stop_rickroll()
         self.running = False
         self.mic_muted = True
 
@@ -6849,6 +8140,8 @@ class ZanelApp:
 
         self.closed = True
 
+        self.stop_rickroll()
+
         self.compact_dragging = False
 
         try:
@@ -6876,77 +8169,6 @@ class ZanelApp:
             )
         except tk.TclError:
             pass
-
-        try:
-            self.root.quit()
-        except tk.TclError:
-            pass
-
-        try:
-            self.root.destroy()
-        except tk.TclError:
-            pass
-
-    def close_application(self):
-        self.closed = True
-
-        try:
-            if getattr(
-                self,
-                "compact_window",
-                None
-            ):
-                self.compact_window.destroy()
-        except tk.TclError:
-            pass
-
-        self.compact_window = None
-
-        try:
-            self.root.quit()
-        except tk.TclError:
-            pass
-
-        try:
-            self.root.destroy()
-        except tk.TclError:
-            pass
-
-    def close_application(self):
-        try:
-            if getattr(
-                self,
-                "compact_window",
-                None
-            ):
-                self.compact_window.destroy()
-        except tk.TclError:
-            pass
-
-        self.compact_window = None
-
-        try:
-            self.root.quit()
-        except tk.TclError:
-            pass
-
-        try:
-            self.root.destroy()
-        except tk.TclError:
-            pass
-
-    def close_application(self):
-        try:
-            if getattr(
-                self,
-                "compact_window",
-                None
-            ):
-                self.compact_window.destroy()
-        except tk.TclError:
-            pass
-
-        self.compact_window = None
 
         try:
             self.root.quit()

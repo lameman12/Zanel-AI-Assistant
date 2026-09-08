@@ -11,6 +11,7 @@ network name (SSID), and link speed.
 * close_app: close a Windows application by name or executable (requires confirmation)
 * close_vanta: closes the Vanta desktop application. (requires confirmation)
 * flip_coin: flips a virtual coin and displays an animated coin flip in the Vanta UI. The coin will randomly land on Heads or Tails, display the result, and then disappear. (requires no confirmation)
+* dice_roll: rolls a virtual dice and displays an animated dice roll in the Vanta UI. The dice will land on a random number before disappearing. (requires no confirmation)
 * open_url: opens a web URL. (requires confirmation)
 * mute_mic: mute or unmutes the microphone through the Vanta app. (requires no confirmation)
 * volume: sets Windows master volume percentage (0-100) (requires confirmation)

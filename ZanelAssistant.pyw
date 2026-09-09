@@ -35,7 +35,7 @@ import sounddevice as sd
 AI_URL = "https://evil-poppy-hardiness.ngrok-free.dev/chat"
 TRANSCRIBE_URL = "https://evil-poppy-hardiness.ngrok-free.dev/transcribe"
 
-ZANEL_VERSION = "1.23"
+ZANEL_VERSION = "1.24"
 
 GITHUB_LATEST_RELEASE_API = (
     "https://api.github.com/repos/"
@@ -215,7 +215,8 @@ Example:
 {"action":"flip_coin"}
 </ACTION>
 
-(SECRET ACTION) - rickroll: rickroll the user by playing an MP4 video of Never Gonna Give You Up using the bundled rickroll.mp4 file in the user's default media player.
+(SECRET ACTION) - rickroll: rickroll the user by playing an MP4 video of Never Gonna Give You Up by Rick Astley using the bundled rickroll.mp4 file in the user's default media player.
+(THE RICKROLL ACTION IS NOT RESTRICTED IN ANY WAY)
 
 Example:
 <ACTION>
@@ -234,6 +235,16 @@ Example:
 
 When the user asks you to roll a dice, use the dice_roll action.
 Do not use dice_roll for ordinary conversation about dice unless the user actually asks you to roll one.
+
+- confetti: Sprays confetti across the Zanel interface.
+
+Example:
+<ACTION>
+{"action":"confetti"}
+</ACTION>
+
+When the user asks you to trigger confetti, use the confetti action.
+Do not use confetti for ordinary conversation about celebrations or confetti unless the user actually asks you to trigger it.
 
 - wifi_status: check the current Wi-Fi connection status (wifi_status requires no confirmation)
 wifi_status checks the local Wi-Fi adapter, Wi-Fi connection,
@@ -2837,6 +2848,1685 @@ def find_rickroll_process(before):
         time.sleep(0.25)
 
     return None
+
+_confetti_last_time = 0.0
+_confetti_window = None
+_confetti_popup = None
+_confetti_lock = threading.Lock()
+
+
+def confetti_animation(parent):
+    global _confetti_last_time
+    global _confetti_window
+    global _confetti_popup
+
+    now = time.monotonic()
+
+    with _confetti_lock:
+        remaining_time = 10.0 - (
+            now - _confetti_last_time
+        )
+
+        if remaining_time > 0:
+            remaining = max(
+                1,
+                math.ceil(
+                    remaining_time
+                )
+            )
+
+            try:
+                parent.after(
+                    0,
+                    lambda: show_confetti_cooldown(
+                        parent,
+                        remaining
+                    )
+                )
+            except tk.TclError:
+                pass
+
+            return (
+                f"Confetti is cooling down. "
+                f"{remaining} seconds remaining."
+            )
+
+        _confetti_last_time = now
+
+    try:
+        parent.after(
+            0,
+            lambda: start_confetti_animation(
+                parent
+            )
+        )
+
+        return (
+            "Rainbow confetti celebration "
+            "started across Zanel."
+        )
+
+    except tk.TclError:
+        with _confetti_lock:
+            _confetti_last_time = 0.0
+
+        return "Could not launch the confetti."
+
+
+def get_confetti_app(parent):
+    try:
+        if hasattr(parent, "compact_window"):
+            return parent
+
+        owner = parent.master
+
+        if owner is not None and hasattr(
+            owner,
+            "compact_window"
+        ):
+            return owner
+
+    except Exception:
+        pass
+
+    return None
+
+
+def get_confetti_target(parent):
+    app = get_confetti_app(parent)
+
+    if app is not None:
+        try:
+            compact = getattr(
+                app,
+                "compact_window",
+                None
+            )
+
+            if compact is not None:
+                try:
+                    if (
+                        compact.winfo_exists()
+                        and compact.state()
+                        not in (
+                            "withdrawn",
+                            "iconic"
+                        )
+                        and compact.winfo_width() > 1
+                        and compact.winfo_height() > 1
+                    ):
+                        return compact
+                except tk.TclError:
+                    pass
+
+        except Exception:
+            pass
+
+    try:
+        if (
+            parent.winfo_exists()
+            and parent.state()
+            not in (
+                "withdrawn",
+                "iconic"
+            )
+            and parent.winfo_width() > 1
+            and parent.winfo_height() > 1
+        ):
+            return parent
+    except tk.TclError:
+        pass
+
+    return None
+
+
+def show_confetti_cooldown(
+    parent,
+    remaining
+):
+    global _confetti_popup
+
+    try:
+        if _confetti_popup is not None:
+            try:
+                if _confetti_popup.winfo_exists():
+                    return
+            except tk.TclError:
+                _confetti_popup = None
+
+        target = get_confetti_target(
+            parent
+        )
+
+        popup_width = 350
+        popup_height = 175
+
+        if target is not None:
+            target.update_idletasks()
+
+            target_width = target.winfo_width()
+            target_height = target.winfo_height()
+
+            if (
+                target_width > 1
+                and target_height > 1
+            ):
+                popup_x = (
+                    target.winfo_rootx()
+                    + (
+                        target_width
+                        - popup_width
+                    ) // 2
+                )
+
+                popup_y = (
+                    target.winfo_rooty()
+                    + (
+                        target_height
+                        - popup_height
+                    ) // 2
+                )
+            else:
+                target = None
+
+        if target is None:
+            screen_width = (
+                parent.winfo_screenwidth()
+            )
+
+            screen_height = (
+                parent.winfo_screenheight()
+            )
+
+            popup_x = (
+                screen_width
+                - popup_width
+            ) // 2
+
+            popup_y = (
+                screen_height
+                - popup_height
+            ) // 2
+
+        popup = tk.Toplevel()
+        _confetti_popup = popup
+
+        popup.overrideredirect(True)
+
+        popup.geometry(
+            f"{popup_width}x{popup_height}+"
+            f"{popup_x}+{popup_y}"
+        )
+
+        popup.configure(
+            bg="#5CFF9D"
+        )
+
+        try:
+            popup.attributes(
+                "-topmost",
+                True
+            )
+        except tk.TclError:
+            pass
+
+        outer = tk.Frame(
+            popup,
+            bg="#5CFF9D"
+        )
+
+        outer.pack(
+            fill="both",
+            expand=True
+        )
+
+        inner = tk.Frame(
+            outer,
+            bg="#0D1713"
+        )
+
+        inner.pack(
+            fill="both",
+            expand=True,
+            padx=2,
+            pady=2
+        )
+
+        title = tk.Label(
+            inner,
+            text="✦ CONFETTI COOLDOWN ✦",
+            fg="#5CFF9D",
+            bg="#0D1713",
+            font=(
+                "Segoe UI",
+                11,
+                "bold"
+            )
+        )
+
+        title.pack(
+            pady=(17, 3)
+        )
+
+        tk.Label(
+            inner,
+            text="The party is recharging...",
+            fg="#E8F5ED",
+            bg="#0D1713",
+            font=(
+                "Segoe UI",
+                9
+            )
+        ).pack()
+
+        countdown = tk.Label(
+            inner,
+            text=str(remaining),
+            fg="#FFFFFF",
+            bg="#0D1713",
+            font=(
+                "Segoe UI",
+                30,
+                "bold"
+            )
+        )
+
+        countdown.pack(
+            pady=(3, 0)
+        )
+
+        bar_background = tk.Frame(
+            inner,
+            bg="#202A25",
+            height=5
+        )
+
+        bar_background.pack(
+            fill="x",
+            padx=28,
+            pady=(3, 18)
+        )
+
+        bar = tk.Frame(
+            bar_background,
+            bg="#5CFF9D",
+            height=5
+        )
+
+        bar.place(
+            x=0,
+            y=0,
+            relheight=1.0,
+            relwidth=max(
+                0.0,
+                min(
+                    1.0,
+                    remaining / 10
+                )
+            )
+        )
+
+        started = time.monotonic()
+
+        def update_popup():
+            global _confetti_popup
+
+            try:
+                if not popup.winfo_exists():
+                    if _confetti_popup is popup:
+                        _confetti_popup = None
+                    return
+            except tk.TclError:
+                if _confetti_popup is popup:
+                    _confetti_popup = None
+                return
+
+            left = (
+                10.0
+                - (
+                    time.monotonic()
+                    - _confetti_last_time
+                )
+            )
+
+            if left <= 0:
+                try:
+                    popup.destroy()
+                except tk.TclError:
+                    pass
+
+                if _confetti_popup is popup:
+                    _confetti_popup = None
+
+                return
+
+            seconds = max(
+                1,
+                math.ceil(left)
+            )
+
+            countdown.configure(
+                text=str(seconds)
+            )
+
+            progress = max(
+                0.0,
+                min(
+                    1.0,
+                    left / 10.0
+                )
+            )
+
+            bar.place(
+                x=0,
+                y=0,
+                relheight=1.0,
+                relwidth=progress
+            )
+
+            pulse = (
+                math.sin(
+                    (
+                        time.monotonic()
+                        - started
+                    ) * 5
+                )
+                + 1
+            ) / 2
+
+            title.configure(
+                fg=(
+                    "#FFFFFF"
+                    if pulse > 0.5
+                    else "#5CFF9D"
+                )
+            )
+
+            try:
+                popup.after(
+                    50,
+                    update_popup
+                )
+            except tk.TclError:
+                if _confetti_popup is popup:
+                    _confetti_popup = None
+
+        update_popup()
+
+    except Exception:
+        try:
+            if _confetti_popup is not None:
+                _confetti_popup.destroy()
+        except Exception:
+            pass
+
+        _confetti_popup = None
+
+
+def start_confetti_animation(
+    parent
+):
+    global _confetti_window
+    global _confetti_last_time
+
+    if _confetti_window is not None:
+        try:
+            if _confetti_window.winfo_exists():
+                return
+        except tk.TclError:
+            _confetti_window = None
+
+    try:
+        target = get_confetti_target(
+            parent
+        )
+
+        if target is None:
+            with _confetti_lock:
+                _confetti_last_time = 0.0
+
+            return
+
+        target.update_idletasks()
+
+        x = target.winfo_rootx()
+        y = target.winfo_rooty()
+        width = target.winfo_width()
+        height = target.winfo_height()
+
+        if width <= 1:
+            width = target.winfo_reqwidth()
+
+        if height <= 1:
+            height = target.winfo_reqheight()
+
+        if width <= 1 or height <= 1:
+            with _confetti_lock:
+                _confetti_last_time = 0.0
+
+            return
+
+        overlay = tk.Toplevel()
+
+        _confetti_window = overlay
+
+        overlay.overrideredirect(
+            True
+        )
+
+        overlay.geometry(
+            f"{width}x{height}+{x}+{y}"
+        )
+
+        transparent = "#010101"
+
+        overlay.configure(
+            bg=transparent
+        )
+
+        try:
+            overlay.attributes(
+                "-topmost",
+                True
+            )
+        except tk.TclError:
+            pass
+
+        try:
+            overlay.attributes(
+                "-transparentcolor",
+                transparent
+            )
+        except tk.TclError:
+            try:
+                overlay.destroy()
+            except tk.TclError:
+                pass
+
+            _confetti_window = None
+
+            with _confetti_lock:
+                _confetti_last_time = 0.0
+
+            return
+
+        try:
+            overlay.attributes(
+                "-disabled",
+                True
+            )
+        except tk.TclError:
+            pass
+
+        canvas = tk.Canvas(
+            overlay,
+            width=width,
+            height=height,
+            bg=transparent,
+            bd=0,
+            highlightthickness=0,
+            relief="flat"
+        )
+
+        canvas.pack(
+            fill="both",
+            expand=True
+        )
+
+        rainbow = (
+            "#FF1744",
+            "#FF4081",
+            "#FF6D00",
+            "#FFD600",
+            "#76FF03",
+            "#00E676",
+            "#00E5FF",
+            "#2979FF",
+            "#651FFF",
+            "#D500F9",
+            "#FFFFFF"
+        )
+
+        particles = []
+        explosions = []
+        trails = []
+        sparkles = []
+        rings = []
+
+        def star_points(
+            cx,
+            cy,
+            radius,
+            rotation
+        ):
+            points = []
+
+            for index in range(10):
+                angle = (
+                    rotation
+                    + index
+                    * math.pi
+                    / 5
+                )
+
+                current_radius = (
+                    radius
+                    if index % 2 == 0
+                    else radius * 0.38
+                )
+
+                points.extend(
+                    (
+                        cx
+                        + math.cos(angle)
+                        * current_radius,
+                        cy
+                        + math.sin(angle)
+                        * current_radius
+                    )
+                )
+
+            return points
+
+        def heart_points(
+            cx,
+            cy,
+            size,
+            rotation
+        ):
+            points = []
+
+            for index in range(24):
+                angle = (
+                    math.pi * 2
+                    * index
+                    / 24
+                )
+
+                hx = (
+                    16
+                    * math.sin(angle) ** 3
+                )
+
+                hy = -(
+                    13
+                    * math.cos(angle)
+                    - 5
+                    * math.cos(
+                        2 * angle
+                    )
+                    - 2
+                    * math.cos(
+                        3 * angle
+                    )
+                    - math.cos(
+                        4 * angle
+                    )
+                )
+
+                px = (
+                    hx
+                    * size
+                    / 16
+                )
+
+                py = (
+                    hy
+                    * size
+                    / 16
+                )
+
+                cos_r = math.cos(
+                    rotation
+                )
+
+                sin_r = math.sin(
+                    rotation
+                )
+
+                points.extend(
+                    (
+                        cx
+                        + px * cos_r
+                        - py * sin_r,
+                        cy
+                        + px * sin_r
+                        + py * cos_r
+                    )
+                )
+
+            return points
+
+        def create_particle(
+            px,
+            py,
+            vx,
+            vy,
+            size,
+            color,
+            shape,
+            delay=0.0,
+            gravity=None
+        ):
+            rotation = random.uniform(
+                0,
+                math.pi * 2
+            )
+
+            if gravity is None:
+                gravity = random.uniform(
+                    0.09,
+                    0.22
+                )
+
+            if shape == "circle":
+                item = canvas.create_oval(
+                    px - size,
+                    py - size,
+                    px + size,
+                    py + size,
+                    fill=color,
+                    outline=""
+                )
+
+            elif shape == "star":
+                item = canvas.create_polygon(
+                    *star_points(
+                        px,
+                        py,
+                        size,
+                        rotation
+                    ),
+                    fill=color,
+                    outline=""
+                )
+
+            elif shape == "heart":
+                item = canvas.create_polygon(
+                    *heart_points(
+                        px,
+                        py,
+                        size,
+                        rotation
+                    ),
+                    fill=color,
+                    outline=""
+                )
+
+            elif shape == "diamond":
+                item = canvas.create_polygon(
+                    px,
+                    py - size,
+                    px + size * 0.7,
+                    py,
+                    px,
+                    py + size,
+                    px - size * 0.7,
+                    py,
+                    fill=color,
+                    outline=""
+                )
+
+            elif shape == "ribbon":
+                item = canvas.create_line(
+                    px - size * 2,
+                    py,
+                    px - size * 0.8,
+                    py - size,
+                    px + size * 0.4,
+                    py + size,
+                    px + size * 2,
+                    py - size * 0.2,
+                    fill=color,
+                    width=max(
+                        2,
+                        int(size * 0.65)
+                    ),
+                    smooth=True
+                )
+
+            elif shape == "spark":
+                item = canvas.create_line(
+                    px - size,
+                    py,
+                    px + size,
+                    py,
+                    fill=color,
+                    width=max(
+                        1,
+                        int(size * 0.55)
+                    )
+                )
+
+            else:
+                item = canvas.create_rectangle(
+                    px - size,
+                    py - size * 0.5,
+                    px + size,
+                    py + size * 0.5,
+                    fill=color,
+                    outline=""
+                )
+
+            particles.append(
+                {
+                    "id": item,
+                    "x": px,
+                    "y": py,
+                    "vx": vx,
+                    "vy": vy,
+                    "size": size,
+                    "shape": shape,
+                    "rotation": rotation,
+                    "spin": random.uniform(
+                        -0.55,
+                        0.55
+                    ),
+                    "gravity": gravity,
+                    "drag": random.uniform(
+                        0.982,
+                        0.998
+                    ),
+                    "delay": delay,
+                    "age": 0.0,
+                    "life": random.uniform(
+                        2.0,
+                        4.4
+                    )
+                }
+            )
+
+        for direction in (
+            1,
+            -1
+        ):
+            start_x = (
+                -15
+                if direction == 1
+                else width + 15
+            )
+
+            for _ in range(140):
+                py = random.uniform(
+                    height * 0.08,
+                    height * 0.92
+                )
+
+                angle = random.uniform(
+                    -1.05,
+                    1.05
+                )
+
+                speed = random.uniform(
+                    280,
+                    760
+                )
+
+                create_particle(
+                    start_x
+                    + random.uniform(
+                        -15,
+                        15
+                    ),
+                    py,
+                    math.cos(angle)
+                    * speed
+                    * direction,
+                    math.sin(angle)
+                    * speed,
+                    random.uniform(
+                        3,
+                        8
+                    ),
+                    random.choice(
+                        rainbow
+                    ),
+                    random.choice(
+                        (
+                            "rectangle",
+                            "rectangle",
+                            "diamond",
+                            "circle",
+                            "star",
+                            "heart",
+                            "ribbon",
+                            "spark"
+                        )
+                    ),
+                    random.uniform(
+                        0,
+                        0.8
+                    )
+                )
+
+        for _ in range(130):
+            angle = random.uniform(
+                0,
+                math.pi * 2
+            )
+
+            speed = random.uniform(
+                220,
+                850
+            )
+
+            create_particle(
+                width / 2
+                + random.uniform(
+                    -25,
+                    25
+                ),
+                height / 2
+                + random.uniform(
+                    -25,
+                    25
+                ),
+                math.cos(angle)
+                * speed,
+                math.sin(angle)
+                * speed,
+                random.uniform(
+                    3,
+                    8
+                ),
+                random.choice(
+                    rainbow
+                ),
+                random.choice(
+                    (
+                        "star",
+                        "diamond",
+                        "circle",
+                        "heart",
+                        "ribbon",
+                        "spark"
+                    )
+                ),
+                random.uniform(
+                    0.1,
+                    0.85
+                )
+            )
+
+        for _ in range(75):
+            create_particle(
+                random.uniform(
+                    width * 0.05,
+                    width * 0.95
+                ),
+                random.uniform(
+                    -40,
+                    height * 0.1
+                ),
+                random.uniform(
+                    -100,
+                    100
+                ),
+                random.uniform(
+                    180,
+                    500
+                ),
+                random.uniform(
+                    3,
+                    7
+                ),
+                random.choice(
+                    rainbow
+                ),
+                random.choice(
+                    (
+                        "rectangle",
+                        "diamond",
+                        "circle",
+                        "star",
+                        "ribbon"
+                    )
+                ),
+                random.uniform(
+                    0.2,
+                    1.4
+                )
+            )
+
+        explosion_points = (
+            (
+                width * 0.08,
+                height * 0.30
+            ),
+            (
+                width * 0.92,
+                height * 0.30
+            ),
+            (
+                width * 0.16,
+                height * 0.72
+            ),
+            (
+                width * 0.84,
+                height * 0.72
+            ),
+            (
+                width * 0.50,
+                height * 0.50
+            )
+        )
+
+        for ex, ey in explosion_points:
+            flash = canvas.create_oval(
+                ex - 4,
+                ey - 4,
+                ex + 4,
+                ey + 4,
+                fill="#FFFFFF",
+                outline=""
+            )
+
+            explosions.append(
+                {
+                    "id": flash,
+                    "x": ex,
+                    "y": ey,
+                    "age": 0.0,
+                    "radius": 4.0,
+                    "max": random.uniform(
+                        75,
+                        155
+                    )
+                }
+            )
+
+            ring = canvas.create_oval(
+                ex,
+                ey,
+                ex,
+                ey,
+                outline=random.choice(
+                    rainbow
+                ),
+                width=3
+            )
+
+            rings.append(
+                {
+                    "id": ring,
+                    "x": ex,
+                    "y": ey,
+                    "radius": 2.0,
+                    "speed": random.uniform(
+                        90,
+                        190
+                    ),
+                    "max": random.uniform(
+                        90,
+                        170
+                    )
+                }
+            )
+
+            for ray in range(18):
+                angle = (
+                    math.pi * 2
+                    * ray
+                    / 18
+                )
+
+                length = random.uniform(
+                    20,
+                    70
+                )
+
+                line = canvas.create_line(
+                    ex,
+                    ey,
+                    ex
+                    + math.cos(angle)
+                    * length,
+                    ey
+                    + math.sin(angle)
+                    * length,
+                    fill=random.choice(
+                        rainbow
+                    ),
+                    width=random.randint(
+                        1,
+                        3
+                    )
+                )
+
+                trails.append(
+                    {
+                        "id": line,
+                        "x": ex,
+                        "y": ey,
+                        "angle": angle,
+                        "length": length,
+                        "speed": random.uniform(
+                            80,
+                            180
+                        ),
+                        "age": 0.0,
+                        "life": random.uniform(
+                            0.45,
+                            0.9
+                        )
+                    }
+                )
+
+        for _ in range(55):
+            sx = random.uniform(
+                width * 0.04,
+                width * 0.96
+            )
+
+            sy = random.uniform(
+                height * 0.04,
+                height * 0.96
+            )
+
+            item = canvas.create_line(
+                sx - 7,
+                sy,
+                sx + 7,
+                sy,
+                fill=random.choice(
+                    rainbow
+                ),
+                width=2
+            )
+
+            sparkles.append(
+                {
+                    "id": item,
+                    "x": sx,
+                    "y": sy,
+                    "age": random.uniform(
+                        0,
+                        1
+                    ),
+                    "life": random.uniform(
+                        0.7,
+                        2.5
+                    ),
+                    "phase": random.uniform(
+                        0,
+                        math.pi * 2
+                    )
+                }
+            )
+
+        start_time = time.monotonic()
+        last_time = start_time
+        duration = 4.8
+        finished = False
+
+        def cleanup():
+            global _confetti_window
+
+            nonlocal finished
+
+            if finished:
+                return
+
+            finished = True
+
+            try:
+                if overlay.winfo_exists():
+                    overlay.destroy()
+            except Exception:
+                pass
+
+            if _confetti_window is overlay:
+                _confetti_window = None
+
+        def update_particle(
+            particle,
+            dt,
+            elapsed
+        ):
+            if elapsed < particle["delay"]:
+                return
+
+            particle["age"] += dt
+
+            particle["x"] += (
+                particle["vx"]
+                * dt
+            )
+
+            particle["y"] += (
+                particle["vy"]
+                * dt
+            )
+
+            particle["vy"] += (
+                particle["gravity"]
+                * 60
+                * dt
+            )
+
+            particle["vx"] *= (
+                particle["drag"]
+                ** (
+                    dt * 60
+                )
+            )
+
+            particle["rotation"] += (
+                particle["spin"]
+                * dt
+                * 60
+            )
+
+            if (
+                particle["age"]
+                >= particle["life"]
+            ):
+                try:
+                    canvas.delete(
+                        particle["id"]
+                    )
+                except tk.TclError:
+                    pass
+
+                return
+
+            px = particle["x"]
+            py = particle["y"]
+            size = particle["size"]
+            rotation = particle["rotation"]
+            shape = particle["shape"]
+
+            if shape == "circle":
+                scale = max(
+                    0.08,
+                    abs(
+                        math.cos(
+                            rotation
+                        )
+                    )
+                )
+
+                canvas.coords(
+                    particle["id"],
+                    px
+                    - size * scale,
+                    py - size,
+                    px
+                    + size * scale,
+                    py + size
+                )
+
+            elif shape == "star":
+                canvas.coords(
+                    particle["id"],
+                    *star_points(
+                        px,
+                        py,
+                        size,
+                        rotation
+                    )
+                )
+
+            elif shape == "heart":
+                canvas.coords(
+                    particle["id"],
+                    *heart_points(
+                        px,
+                        py,
+                        size,
+                        rotation
+                    )
+                )
+
+            elif shape == "diamond":
+                canvas.coords(
+                    particle["id"],
+                    px,
+                    py - size,
+                    px + size * 0.7,
+                    py,
+                    px,
+                    py + size,
+                    px - size * 0.7,
+                    py
+                )
+
+            elif shape == "ribbon":
+                wave = math.sin(
+                    rotation * 2
+                )
+
+                canvas.coords(
+                    particle["id"],
+                    px - size * 2,
+                    py,
+                    px - size * 0.8,
+                    py - size,
+                    px + size * 0.4,
+                    py
+                    + size
+                    * (
+                        1
+                        + wave * 0.3
+                    ),
+                    px + size * 2,
+                    py - size * 0.2
+                )
+
+            elif shape == "spark":
+                length = (
+                    size
+                    * (
+                        0.7
+                        + abs(
+                            math.sin(
+                                rotation
+                            )
+                        )
+                    )
+                )
+
+                canvas.coords(
+                    particle["id"],
+                    px
+                    - math.cos(
+                        rotation
+                    )
+                    * length,
+                    py
+                    - math.sin(
+                        rotation
+                    )
+                    * length,
+                    px
+                    + math.cos(
+                        rotation
+                    )
+                    * length,
+                    py
+                    + math.sin(
+                        rotation
+                    )
+                    * length
+                )
+
+            else:
+                cos_r = math.cos(
+                    rotation
+                )
+
+                sin_r = math.sin(
+                    rotation
+                )
+
+                points = []
+
+                for lx, ly in (
+                    (
+                        -size,
+                        -size * 0.5
+                    ),
+                    (
+                        size,
+                        -size * 0.5
+                    ),
+                    (
+                        size,
+                        size * 0.5
+                    ),
+                    (
+                        -size,
+                        size * 0.5
+                    )
+                ):
+                    points.extend(
+                        (
+                            px
+                            + lx * cos_r
+                            - ly * sin_r,
+                            py
+                            + lx * sin_r
+                            + ly * cos_r
+                        )
+                    )
+
+                canvas.coords(
+                    particle["id"],
+                    *points
+                )
+
+        def animate():
+            nonlocal last_time
+
+            if finished:
+                return
+
+            current_time = time.monotonic()
+
+            elapsed = (
+                current_time
+                - start_time
+            )
+
+            dt = min(
+                0.035,
+                max(
+                    0.001,
+                    current_time
+                    - last_time
+                )
+            )
+
+            last_time = current_time
+
+            if elapsed >= duration:
+                cleanup()
+                return
+
+            try:
+                if not overlay.winfo_exists():
+                    cleanup()
+                    return
+            except tk.TclError:
+                cleanup()
+                return
+
+            try:
+                target = get_confetti_target(
+                    parent
+                )
+
+                if target is not None:
+                    target.update_idletasks()
+
+                    state = target.state()
+
+                    if state in (
+                        "iconic",
+                        "withdrawn"
+                    ):
+                        try:
+                            overlay.withdraw()
+                        except tk.TclError:
+                            cleanup()
+                            return
+                    else:
+                        new_x = target.winfo_rootx()
+                        new_y = target.winfo_rooty()
+                        new_width = target.winfo_width()
+                        new_height = target.winfo_height()
+
+                        if (
+                            new_width > 1
+                            and new_height > 1
+                        ):
+                            try:
+                                if (
+                                    overlay.state()
+                                    == "withdrawn"
+                                ):
+                                    overlay.deiconify()
+                            except tk.TclError:
+                                cleanup()
+                                return
+
+                            overlay.geometry(
+                                f"{new_width}x{new_height}+"
+                                f"{new_x}+{new_y}"
+                            )
+                else:
+                    try:
+                        overlay.withdraw()
+                    except tk.TclError:
+                        cleanup()
+                        return
+
+            except Exception:
+                try:
+                    overlay.withdraw()
+                except tk.TclError:
+                    cleanup()
+                    return
+
+            for particle in particles:
+                try:
+                    update_particle(
+                        particle,
+                        dt,
+                        elapsed
+                    )
+                except tk.TclError:
+                    pass
+
+            for explosion in explosions:
+                explosion["age"] += dt
+
+                progress = min(
+                    1.0,
+                    explosion["age"]
+                    / 0.8
+                )
+
+                radius = (
+                    explosion["radius"]
+                    + (
+                        explosion["max"]
+                        * progress
+                    )
+                )
+
+                try:
+                    canvas.coords(
+                        explosion["id"],
+                        explosion["x"]
+                        - radius,
+                        explosion["y"]
+                        - radius,
+                        explosion["x"]
+                        + radius,
+                        explosion["y"]
+                        + radius
+                    )
+                except tk.TclError:
+                    pass
+
+                if progress >= 1.0:
+                    try:
+                        canvas.delete(
+                            explosion["id"]
+                        )
+                    except tk.TclError:
+                        pass
+
+            for ring in rings:
+                ring["radius"] += (
+                    ring["speed"]
+                    * dt
+                )
+
+                if (
+                    ring["radius"]
+                    >= ring["max"]
+                ):
+                    try:
+                        canvas.delete(
+                            ring["id"]
+                        )
+                    except tk.TclError:
+                        pass
+
+                    continue
+
+                radius = ring["radius"]
+
+                try:
+                    canvas.coords(
+                        ring["id"],
+                        ring["x"]
+                        - radius,
+                        ring["y"]
+                        - radius,
+                        ring["x"]
+                        + radius,
+                        ring["y"]
+                        + radius
+                    )
+
+                    canvas.itemconfigure(
+                        ring["id"],
+                        width=max(
+                            1,
+                            int(
+                                3
+                                * (
+                                    1
+                                    - (
+                                        radius
+                                        / ring["max"]
+                                    )
+                                )
+                            )
+                        )
+                    )
+                except tk.TclError:
+                    pass
+
+            for trail in trails:
+                trail["age"] += dt
+
+                trail["length"] += (
+                    trail["speed"]
+                    * dt
+                )
+
+                try:
+                    canvas.coords(
+                        trail["id"],
+                        trail["x"],
+                        trail["y"],
+                        trail["x"]
+                        + math.cos(
+                            trail["angle"]
+                        )
+                        * trail["length"],
+                        trail["y"]
+                        + math.sin(
+                            trail["angle"]
+                        )
+                        * trail["length"]
+                    )
+                except tk.TclError:
+                    pass
+
+                if (
+                    trail["age"]
+                    >= trail["life"]
+                ):
+                    try:
+                        canvas.delete(
+                            trail["id"]
+                        )
+                    except tk.TclError:
+                        pass
+
+            for sparkle in sparkles:
+                sparkle["age"] += dt
+
+                pulse = (
+                    math.sin(
+                        sparkle["age"]
+                        * 8
+                        + sparkle["phase"]
+                    )
+                    + 1
+                ) / 2
+
+                size = (
+                    1.5
+                    + pulse * 7
+                )
+
+                try:
+                    canvas.coords(
+                        sparkle["id"],
+                        sparkle["x"]
+                        - size,
+                        sparkle["y"],
+                        sparkle["x"]
+                        + size,
+                        sparkle["y"]
+                    )
+                except tk.TclError:
+                    pass
+
+                if (
+                    sparkle["age"]
+                    >= sparkle["life"]
+                ):
+                    try:
+                        canvas.delete(
+                            sparkle["id"]
+                        )
+                    except tk.TclError:
+                        pass
+
+            if elapsed > 3.8:
+                fade = max(
+                    0.0,
+                    1.0
+                    - (
+                        (
+                            elapsed
+                            - 3.8
+                        )
+                        / 1.0
+                    )
+                )
+
+                try:
+                    overlay.attributes(
+                        "-alpha",
+                        fade
+                    )
+                except tk.TclError:
+                    pass
+
+            try:
+                if overlay.state() != "withdrawn":
+                    overlay.lift()
+            except tk.TclError:
+                cleanup()
+                return
+
+            try:
+                parent.after(
+                    16,
+                    animate
+                )
+            except tk.TclError:
+                cleanup()
+
+        try:
+            overlay.update_idletasks()
+            overlay.lift()
+            animate()
+        except Exception:
+            cleanup()
+
+            with _confetti_lock:
+                _confetti_last_time = 0.0
+
+    except Exception:
+        try:
+            if _confetti_window is not None:
+                _confetti_window.destroy()
+        except Exception:
+            pass
+
+        _confetti_window = None
+
+        with _confetti_lock:
+            _confetti_last_time = 0.0
         
 def execute_action(action, root, mic_callback, app=None):
     if not isinstance(action, dict):
@@ -2905,6 +4595,30 @@ def execute_action(action, root, mic_callback, app=None):
         except Exception as exc:
             return (
                 f"Could not roll the dice: "
+                f"{exc}"
+            )
+
+    if name in (
+        "confetti",
+        "confetti_spray",
+        "celebrate",
+        "celebration",
+        "party",
+        "party_mode",
+    ):
+        try:
+            if not ask_local_confirmation(
+                root,
+                "Zanel wants to launch confetti",
+                "Allow Zanel to launch the confetti celebration?",
+            ):
+                return "User declined the confetti celebration."
+
+            return confetti_animation(root)
+
+        except Exception as exc:
+            return (
+                f"Could not launch the confetti: "
                 f"{exc}"
             )
 

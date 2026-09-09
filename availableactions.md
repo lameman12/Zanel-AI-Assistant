@@ -9,7 +9,7 @@ network name (SSID), and link speed.
 * internet_status: checks whether the PC currently has an active internet connection (requires no confirmation)
 * open_app: launches a Windows application by name or path. (requires confirmation)
 * close_app: close a Windows application by name or executable (requires confirmation)
-* close_vanta: closes the Vanta desktop application. (requires confirmation)
+* close_zanel: closes the Vanta desktop application. (requires confirmation)
 * flip_coin: flips a virtual coin and displays an animated coin flip in the Vanta UI. The coin will randomly land on Heads or Tails, display the result, and then disappear. (requires no confirmation)
 * dice_roll: rolls a virtual dice and displays an animated dice roll in the Vanta UI. The dice will land on a random number before disappearing. (requires no confirmation)
 * open_url: opens a web URL. (requires confirmation)

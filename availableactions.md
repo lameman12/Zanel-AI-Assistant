@@ -26,4 +26,4 @@ network name (SSID), and link speed.
 * silent_mode: mutes or unmutes Vanta's TTS. (requires confirmation)
 * write_text_file: writes a text file. (requires confirmation)
 * open_file: opens the specified file. (requires confirmation)
-* confetti: sprays confetti over the Zanel UI (requires confirmation)
+* confetti: sprays confetti over the Zanel UI. (requires confirmation)

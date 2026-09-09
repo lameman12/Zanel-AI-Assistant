@@ -1,4 +1,4 @@
-# This List Displays all available actions Vanta can perform on your computer.
+# This List Displays all available actions Zanel can perform on your computer.
 <small>This list will be updated accordingly as more updates are released</small>
 
 * ram_usage: checks the current RAM usage (requires no confirmation)
@@ -17,8 +17,8 @@ network name (SSID), and link speed.
 * volume: sets Windows master volume percentage (0-100) (requires confirmation)
 * type_text: types text into the currently focused application. (requires confirmation)
 * shell: runs a Windows command (requires confirmation)
-* play_music: plays a song available to Vanta. (requires confirmation)
-* stop_music: stops the current song Vanta is playing. (requires confirmation)
+* play_music: plays a song available to Zanel. (requires confirmation)
+* stop_music: stops the current song Zanel is playing. (requires confirmation)
 * time: gets the current local time. (requires no confirmation)
 * lock_pc: locks the PC (requires confirmation)
 * press_key: presses the specified key. (requires confirmation)
@@ -26,3 +26,4 @@ network name (SSID), and link speed.
 * silent_mode: mutes or unmutes Vanta's TTS. (requires confirmation)
 * write_text_file: writes a text file. (requires confirmation)
 * open_file: opens the specified file. (requires confirmation)
+* confetti: sprays confetti over the Zanel UI (requires confirmation)

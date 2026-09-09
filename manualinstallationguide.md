@@ -1,20 +1,20 @@
-# Manual Installation Guide - Vanta
+# Manual Installation Guide - Zanel
 
-> **TIP:** You can download Vanta much easier by using the: [Automatic Installer](https://github.com/lameman12/Vanta-AI-Assistant/releases/download/Installer/VantaInstaller.exe).
+> **TIP:** You can download Zanel much easier by using the: [Automatic Installer](https://github.com/lameman12/Zanel-AI-Assistant/releases/download/Installer/ZanelInstaller.exe).
 
 
-This includes the requirements, installation steps and troubleshooting when downloading Vanta.
+This includes the requirements, installation steps and troubleshooting when downloading Zanel.
 
 (Use the alternative python -m / python -c commands if normal commands beginning with 'py -3.11' say py is not recognised)
 
 
-## Requirements
+## Requirements (OUTDATED, USE THE AUTOMATIC INSTALLER INSTEAD.)
 
 * Windows 10 or Windows 11
 * 64-bit Windows
 * Internet connection
 * Python 3.11 or Python 3.12 (64-bit)
-* Vanta Assistant source code
+* Zanel Assistant source code
 
 ---
 
@@ -114,7 +114,7 @@ Wait for it to finish.
 
 ---
 
-## 6. Install All Vanta Dependencies
+## 6. Install All Zanel Dependencies
 
 Run:
 
@@ -141,7 +141,7 @@ Pillow
 
 ### NumPy
 
-Vanta imports:
+Zanel imports:
 
 ```python
 import numpy as np
@@ -161,7 +161,7 @@ py -3.11 -m pip install numpy
 
 ### Requests
 
-Vanta imports:
+Zanel imports:
 
 ```python
 import requests
@@ -181,7 +181,7 @@ py -3.11 -m pip install requests
 
 ### SoundDevice
 
-Vanta imports:
+Zanel imports:
 
 ```python
 import sounddevice as sd
@@ -201,7 +201,7 @@ py -3.11 -m pip install sounddevice
 
 ### Pillow
 
-Vanta imports:
+Zanel imports:
 
 ```python
 from PIL import Image, ImageTk
@@ -222,7 +222,7 @@ py -3.11 -m pip install Pillow
 
 ### Faster-Whisper
 
-Vanta imports:
+Zanel imports:
 
 ```python
 from faster_whisper import WhisperModel
@@ -242,7 +242,7 @@ py -3.11 -m pip install faster-whisper
 
 ### Pycaw
 
-Vanta imports:
+Zanel imports:
 
 ```python
 from pycaw.pycaw import AudioUtilities
@@ -262,7 +262,7 @@ py -3.11 -m pip install pycaw
 
 ### PyAutoGUI
 
-Vanta imports:
+Zanel imports:
 
 ```python
 import pyautogui
@@ -282,7 +282,7 @@ py -3.11 -m pip install pyautogui
 
 ### Pyperclip
 
-Vanta imports:
+Zanel imports:
 
 ```python
 import pyperclip
@@ -346,40 +346,40 @@ They are already part of Python.
 
 ---
 
-## 9. Verify Every Vanta Import
+## 9. Verify Every Zanel Import
 
 Run:
 
 ```bat
-py -3.11 -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL VANTA IMPORTS OK')"
+py -3.11 -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL ZANEL IMPORTS OK')"
 ```
 
 or: 
 
 ```bat
-python -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL VANTA IMPORTS OK')"
+python -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL ZANEL IMPORTS OK')"
 ```
 
 A successful result is:
 
 ```text
-ALL VANTA IMPORTS OK
+ALL Zanel IMPORTS OK
 ```
 
 ---
 
-## 10. Check That VantaAssistant.pyw Exists
+## 10. Check That ZanelAssistant.pyw Exists
 
 Run:
 
 ```bat
-dir VantaAssistant.pyw
+dir ZanelAssistant.pyw
 ```
 
 You should see:
 
 ```text
-VantaAssistant.pyw
+ZanelAssistant.pyw
 ```
 
 If Windows reports:
@@ -401,22 +401,22 @@ to see the current directory.
 Then use:
 
 ```bat
-cd "PATH\TO\VANTA"
+cd "PATH\TO\Zanel"
 ```
 
 to enter the correct directory.
 
 ---
 
-## 11. Run Vanta Assistant
+## 11. Run Zanel Assistant
 
 Run:
 
 ```bat
-py -3.11 VantaAssistant.pyw
+py -3.11 ZanelAssistant.pyw
 ```
 
-Vanta should start.
+Zanel should start.
 
 Using:
 
@@ -428,7 +428,7 @@ ensures that Python 3.11 is being used.
 
 ---
 
-## 12. Check the Exact Python Vanta Uses
+## 12. Check the Exact Python Zanel Uses
 
 Run:
 
@@ -580,7 +580,7 @@ If that shows Python 3.11, use:
 py -3.11
 ```
 
-for Vanta.
+for Zanel.
 
 Install packages using:
 
@@ -594,10 +594,10 @@ or:
 python -m pip install --upgrade numpy requests sounddevice faster-whisper pycaw pyautogui pyperclip Pillow
 ```
 
-Run Vanta using:
+Run Zanel using:
 
 ```bat
-py -3.11 VantaAssistant.pyw
+py -3.11 ZanelAssistant.pyw
 ```
 
 ---
@@ -797,19 +797,19 @@ ALL THIRD-PARTY PACKAGES OK
 Run:
 
 ```bat
-py -3.11 -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; import sys; print('VANTA ENVIRONMENT READY'); print('Python:', sys.version); print('Executable:', sys.executable)"
+py -3.11 -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; import sys; print('ZANEL ENVIRONMENT READY'); print('Python:', sys.version); print('Executable:', sys.executable)"
 ```
 
 or:
 
 ```bat
-python -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; import sys; print('VANTA ENVIRONMENT READY'); print('Python:', sys.version); print('Executable:', sys.executable)"
+python -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; import sys; print('ZANEL ENVIRONMENT READY'); print('Python:', sys.version); print('Executable:', sys.executable)"
 ```
 
 A successful result should contain:
 
 ```text
-VANTA ENVIRONMENT READY
+ZANEL ENVIRONMENT READY
 Python: 3.11...
 Executable: ...
 ```
@@ -843,7 +843,7 @@ python -m pip install --upgrade pip
 ```
 
 
-## Install Vanta Dependencies
+## Install Zanel Dependencies
 
 ```bat
 py -3.11 -m pip install --upgrade numpy requests sounddevice faster-whisper pycaw pyautogui pyperclip Pillow
@@ -858,20 +858,20 @@ python -m pip install --upgrade numpy requests sounddevice faster-whisper pycaw 
 ## Verify Imports
 
 ```bat
-py -3.11 -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL VANTA IMPORTS OK')"
+py -3.11 -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL ZANEL IMPORTS OK')"
 ```
 
 or:
 
 ```bat
-python -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL VANTA IMPORTS OK')"
+python -c "import json, os, queue, difflib, shutil, subprocess, tempfile, threading, random, time, tkinter, tkinter.messagebox, webbrowser, math, winsound, getpass, urllib.request, uuid; from pathlib import Path; from datetime import datetime; import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL ZANEL IMPORTS OK')"
 ```
 
 
-## Run Vanta
+## Run Zanel
 
 ```bat
-py -3.11 VantaAssistant.pyw
+py -3.11 ZanelAssistant.pyw
 ```
 
 ---
@@ -883,7 +883,7 @@ For a fresh Python 3.11 installation:
 ```bat
 py -3.11 -m pip install --upgrade pip
 py -3.11 -m pip install --upgrade numpy requests sounddevice faster-whisper pycaw pyautogui pyperclip Pillow
-py -3.11 -c "import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL VANTA IMPORTS OK')"
+py -3.11 -c "import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL ZANEL IMPORTS OK')"
 ```
 
 or:
@@ -891,5 +891,5 @@ or:
 ```bat
 python -m pip install --upgrade pip
 python -m pip install --upgrade numpy requests sounddevice faster-whisper pycaw pyautogui pyperclip Pillow
-python -c "import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL VANTA IMPORTS OK')"
+python -c "import numpy, requests, sounddevice, faster_whisper, pycaw.pycaw, pyautogui, pyperclip; from PIL import Image, ImageTk; print('ALL ZANEL IMPORTS OK')"
 ```

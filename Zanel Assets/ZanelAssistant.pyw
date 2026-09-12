@@ -580,6 +580,29 @@ User: "Open report.pdf"
 {"action":"open_file","filename":"report.pdf"}
 </ACTION>
 
+- search_file: search the Windows PC for a file by name and return the matching file name and full file path. The search should check the user's files across available drives and common folders, including Desktop, Downloads, Documents, Pictures, Videos, Music, and other accessible locations. The search supports exact file names as well as similar, partial, or misspelled file names. Use "filename" as the JSON property name.
+
+Example:
+
+User: "Find my homework file"
+<ACTION>
+{"action":"search_file","filename":"homework"}
+</ACTION>
+
+User: "Search for rickroll.mp4"
+<ACTION>
+{"action":"search_file","filename":"rickroll.mp4"}
+</ACTION>
+
+User: "Find the file called ZanelAssistant"
+<ACTION>
+{"action":"search_file","filename":"ZanelAssistant"}
+</ACTION>
+
+When search_file returns results, use the returned file name and full path naturally in your response.
+
+Do not use open_file when the user only asks you to find, locate, search for, or tell them where a file is. Use search_file for file-location requests.
+
 - type_text: type text into the currently focused application; this requires confirmation, Use "text" as the JSON property containing the exact text to type. This is a COMPUTER ACTION. When the user asks you to type, enter, write,
   paste, or input specific text into the currently focused application,
   But, the user must EXPLICITLY specify that they want you to type for them. Never infer a typing request from normal conversation. Never use type_text just because the user's message contains words that could be
@@ -6129,6 +6152,910 @@ def execute_action(action, root, mic_callback, app=None):
         except Exception as exc:
             return (
                 f"Could not open the file: {exc}"
+            )
+
+    if name in (
+        "search_file",
+        "find_file",
+        "search_for_file",
+    ):
+        requested = str(
+            action.get("filename")
+            or action.get("file")
+            or action.get("name")
+            or action.get("query")
+            or action.get("path")
+            or ""
+        ).strip()
+
+        if not requested:
+            return "No file name supplied."
+
+        try:
+            requested = os.path.expandvars(
+                os.path.expanduser(
+                    requested.strip('"').strip("'")
+                )
+            )
+
+            def normalize_text(value):
+                value = str(
+                    value
+                ).lower().strip()
+
+                return "".join(
+                    character
+                    for character in value
+                    if character.isalnum()
+                    or character in (
+                        " ",
+                        "_",
+                        "-",
+                        ".",
+                    )
+                ).strip()
+
+            def normalize_filename(value):
+                value = os.path.basename(
+                    os.path.normpath(
+                        str(value)
+                    )
+                )
+
+                return normalize_text(
+                    value
+                )
+
+            def normalize_stem(value):
+                value = normalize_filename(
+                    value
+                )
+
+                return os.path.splitext(
+                    value
+                )[0].strip()
+
+            def tokenize(value):
+                value = normalize_stem(
+                    value
+                )
+
+                return [
+                    token
+                    for token in re.split(
+                        r"[\s_.-]+",
+                        value,
+                    )
+                    if token
+                ]
+
+            def is_file(path):
+                try:
+                    return (
+                        os.path.isfile(path)
+                        and not os.path.islink(path)
+                    )
+                except OSError:
+                    return False
+
+            requested_filename = os.path.basename(
+                os.path.normpath(
+                    requested
+                )
+            )
+
+            requested_full = normalize_filename(
+                requested_filename
+            )
+
+            requested_stem = normalize_stem(
+                requested_filename
+            )
+
+            requested_extension = (
+                os.path.splitext(
+                    requested_filename
+                )[1].lower()
+            )
+
+            requested_tokens = tokenize(
+                requested_filename
+            )
+
+            if not requested_stem:
+                return "No valid file name supplied."
+
+            direct_path = os.path.abspath(
+                requested
+            )
+
+            if is_file(
+                direct_path
+            ):
+                return (
+                    "Found file\n\n"
+                    f"{direct_path}"
+                )
+
+            excluded_directories = {
+                "$recycle.bin",
+                "system volume information",
+                "windows.old",
+                "windows",
+                "program files",
+                "program files (x86)",
+                "programdata",
+                "windowsapps",
+                "msixvc",
+                "node_modules",
+                ".git",
+                ".svn",
+                ".hg",
+                "__pycache__",
+                ".cache",
+                "cache",
+                "temp",
+                "tmp",
+                "package cache",
+                "packages",
+            }
+
+            ignored_extensions = {
+                ".lnk",
+                ".tmp",
+                ".etl",
+                ".db",
+                ".db-wal",
+                ".db-shm",
+            }
+
+            def should_skip_directory(
+                directory
+            ):
+                return (
+                    directory.lower()
+                    in excluded_directories
+                )
+
+            def score_candidate(
+                candidate_path
+            ):
+                candidate_filename = os.path.basename(
+                    candidate_path
+                )
+
+                candidate_full = normalize_filename(
+                    candidate_filename
+                )
+
+                candidate_stem = normalize_stem(
+                    candidate_filename
+                )
+
+                if (
+                    not candidate_stem
+                    or not requested_stem
+                ):
+                    return 0.0
+
+                if (
+                    candidate_full
+                    == requested_full
+                ):
+                    return 1.0
+
+                if (
+                    candidate_stem
+                    == requested_stem
+                ):
+                    return 0.99
+
+                candidate_extension = (
+                    os.path.splitext(
+                        candidate_filename
+                    )[1].lower()
+                )
+
+                if (
+                    requested_extension
+                    and candidate_extension
+                    != requested_extension
+                ):
+                    extension_penalty = 0.10
+                else:
+                    extension_penalty = 0.0
+
+                stem_ratio = difflib.SequenceMatcher(
+                    None,
+                    requested_stem,
+                    candidate_stem,
+                ).ratio()
+
+                full_ratio = difflib.SequenceMatcher(
+                    None,
+                    requested_full,
+                    candidate_full,
+                ).ratio()
+
+                requested_compact = (
+                    requested_stem
+                    .replace(" ", "")
+                    .replace("_", "")
+                    .replace("-", "")
+                )
+
+                candidate_compact = (
+                    candidate_stem
+                    .replace(" ", "")
+                    .replace("_", "")
+                    .replace("-", "")
+                )
+
+                compact_ratio = difflib.SequenceMatcher(
+                    None,
+                    requested_compact,
+                    candidate_compact,
+                ).ratio()
+
+                token_score = 0.0
+
+                if requested_tokens:
+                    candidate_tokens = tokenize(
+                        candidate_filename
+                    )
+
+                    if candidate_tokens:
+                        requested_set = set(
+                            requested_tokens
+                        )
+
+                        candidate_set = set(
+                            candidate_tokens
+                        )
+
+                        overlap = (
+                            requested_set
+                            .intersection(
+                                candidate_set
+                            )
+                        )
+
+                        token_score = (
+                            len(overlap)
+                            / max(
+                                len(requested_set),
+                                len(candidate_set),
+                            )
+                        )
+
+                substring_score = 0.0
+
+                if (
+                    len(requested_stem) >= 4
+                    and requested_stem
+                    in candidate_stem
+                ):
+                    substring_score = 0.94
+
+                reverse_substring_score = 0.0
+
+                if (
+                    len(candidate_stem) >= 4
+                    and candidate_stem
+                    in requested_stem
+                ):
+                    reverse_substring_score = 0.91
+
+                score = max(
+                    stem_ratio,
+                    full_ratio,
+                    compact_ratio,
+                    token_score,
+                    substring_score,
+                    reverse_substring_score,
+                )
+
+                if (
+                    extension_penalty
+                    and score < 0.98
+                ):
+                    score -= extension_penalty
+
+                if len(requested_stem) <= 3:
+                    if (
+                        candidate_stem
+                        != requested_stem
+                    ):
+                        score = min(
+                            score,
+                            0.70,
+                        )
+
+                if (
+                    len(requested_stem) >= 6
+                    and stem_ratio < 0.60
+                    and compact_ratio < 0.65
+                    and token_score < 0.50
+                    and not substring_score
+                ):
+                    score = min(
+                        score,
+                        0.55,
+                    )
+
+                return max(
+                    0.0,
+                    min(
+                        score,
+                        1.0,
+                    ),
+                )
+
+            def find_everything():
+                possible_commands = [
+                    "es.exe",
+                    os.path.join(
+                        os.environ.get(
+                            "ProgramFiles",
+                            r"C:\Program Files",
+                        ),
+                        "Everything",
+                        "es.exe",
+                    ),
+                    os.path.join(
+                        os.environ.get(
+                            "ProgramFiles",
+                            r"C:\Program Files",
+                        ),
+                        "Everything",
+                        "Everything.exe",
+                    ),
+                    os.path.join(
+                        os.environ.get(
+                            "ProgramFiles(x86)",
+                            r"C:\Program Files (x86)",
+                        ),
+                        "Everything",
+                        "es.exe",
+                    ),
+                ]
+
+                for command in possible_commands:
+                    try:
+                        if (
+                            os.path.basename(
+                                command
+                            ).lower()
+                            == "es.exe"
+                            and command == "es.exe"
+                        ):
+                            result = shutil.which(
+                                "es.exe"
+                            )
+
+                            if result:
+                                return result
+
+                        if os.path.isfile(
+                            command
+                        ):
+                            if command.lower().endswith(
+                                "es.exe"
+                            ):
+                                return command
+
+                            es_path = os.path.join(
+                                os.path.dirname(
+                                    command
+                                ),
+                                "es.exe",
+                            )
+
+                            if os.path.isfile(
+                                es_path
+                            ):
+                                return es_path
+
+                    except OSError:
+                        continue
+
+                return None
+
+            def search_everything(
+                executable
+            ):
+                queries = []
+
+                queries.append(
+                    requested_filename
+                )
+
+                if (
+                    requested_stem
+                    and requested_stem
+                    != requested_filename.lower()
+                ):
+                    queries.append(
+                        requested_stem
+                    )
+
+                results = []
+                seen = set()
+
+                for query in queries:
+                    try:
+                        process = subprocess.run(
+                            [
+                                executable,
+                                "-n",
+                                "80",
+                                query,
+                            ],
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="ignore",
+                            timeout=8,
+                            creationflags=subprocess.CREATE_NO_WINDOW,
+                        )
+
+                        if process.returncode != 0:
+                            continue
+
+                        for line in process.stdout.splitlines():
+                            path = line.strip()
+
+                            if not path:
+                                continue
+
+                            if not is_file(
+                                path
+                            ):
+                                continue
+
+                            key = os.path.normcase(
+                                os.path.abspath(
+                                    path
+                                )
+                            )
+
+                            if key in seen:
+                                continue
+
+                            seen.add(
+                                key
+                            )
+
+                            filename = os.path.basename(
+                                path
+                            )
+
+                            extension = (
+                                os.path.splitext(
+                                    filename
+                                )[1].lower()
+                            )
+
+                            if extension in ignored_extensions:
+                                continue
+
+                            results.append(
+                                path
+                            )
+
+                    except (
+                        OSError,
+                        subprocess.SubprocessError,
+                    ):
+                        continue
+
+                return results
+
+            def search_fallback():
+                home = os.path.expanduser(
+                    "~"
+                )
+
+                preferred_locations = [
+                    os.path.join(
+                        home,
+                        "Desktop",
+                    ),
+                    os.path.join(
+                        home,
+                        "Downloads",
+                    ),
+                    os.path.join(
+                        home,
+                        "Documents",
+                    ),
+                    os.path.join(
+                        home,
+                        "Pictures",
+                    ),
+                    os.path.join(
+                        home,
+                        "Videos",
+                    ),
+                    os.path.join(
+                        home,
+                        "Music",
+                    ),
+                    os.path.join(
+                        home,
+                        "OneDrive",
+                    ),
+                ]
+
+                matches = []
+                fuzzy = []
+                seen = set()
+
+                for base_path in preferred_locations:
+                    if not os.path.isdir(
+                        base_path
+                    ):
+                        continue
+
+                    try:
+                        for root_dir, dirs, files in os.walk(
+                            base_path,
+                            topdown=True,
+                            followlinks=False,
+                        ):
+                            dirs[:] = [
+                                directory
+                                for directory in dirs
+                                if not should_skip_directory(
+                                    directory
+                                )
+                            ]
+
+                            for filename in files:
+                                extension = (
+                                    os.path.splitext(
+                                        filename
+                                    )[1].lower()
+                                )
+
+                                if extension in ignored_extensions:
+                                    continue
+
+                                path = os.path.join(
+                                    root_dir,
+                                    filename,
+                                )
+
+                                key = os.path.normcase(
+                                    os.path.abspath(
+                                        path
+                                    )
+                                )
+
+                                if key in seen:
+                                    continue
+
+                                seen.add(
+                                    key
+                                )
+
+                                filename_lower = (
+                                    filename.lower()
+                                )
+
+                                stem = normalize_stem(
+                                    filename
+                                )
+
+                                if (
+                                    filename_lower
+                                    == requested_filename.lower()
+                                ):
+                                    matches.append(
+                                        path
+                                    )
+                                    continue
+
+                                if (
+                                    stem
+                                    == requested_stem
+                                ):
+                                    matches.append(
+                                        path
+                                    )
+                                    continue
+
+                                score = score_candidate(
+                                    path
+                                )
+
+                                if score >= 0.78:
+                                    fuzzy.append(
+                                        (
+                                            score,
+                                            path,
+                                        )
+                                    )
+
+                    except (
+                        OSError,
+                        PermissionError,
+                    ):
+                        continue
+
+                if matches:
+                    return matches, fuzzy
+
+                return [], fuzzy
+
+            everything = find_everything()
+
+            if everything:
+                candidates = search_everything(
+                    everything
+                )
+
+                exact_matches = []
+                stem_matches = []
+                fuzzy_matches = []
+
+                seen = set()
+
+                for path in candidates:
+                    key = os.path.normcase(
+                        os.path.abspath(
+                            path
+                        )
+                    )
+
+                    if key in seen:
+                        continue
+
+                    seen.add(
+                        key
+                    )
+
+                    filename = os.path.basename(
+                        path
+                    )
+
+                    filename_lower = (
+                        filename.lower()
+                    )
+
+                    candidate_stem = normalize_stem(
+                        filename
+                    )
+
+                    if (
+                        filename_lower
+                        == requested_filename.lower()
+                    ):
+                        exact_matches.append(
+                            path
+                        )
+                        continue
+
+                    if (
+                        candidate_stem
+                        == requested_stem
+                    ):
+                        stem_matches.append(
+                            path
+                        )
+                        continue
+
+                    score = score_candidate(
+                        path
+                    )
+
+                    if score >= 0.78:
+                        fuzzy_matches.append(
+                            (
+                                score,
+                                path,
+                            )
+                        )
+
+                if exact_matches:
+                    if len(exact_matches) == 1:
+                        return (
+                            "Found file\n\n"
+                            f"{exact_matches[0]}"
+                        )
+
+                    output = [
+                        f"Found {len(exact_matches)} exact matches",
+                        "",
+                    ]
+
+                    for path in exact_matches[:5]:
+                        output.append(
+                            path
+                        )
+
+                    return "\n".join(
+                        output
+                    )
+
+                if stem_matches:
+                    if len(stem_matches) == 1:
+                        return (
+                            "Found file\n\n"
+                            f"{stem_matches[0]}"
+                        )
+
+                    output = [
+                        f"Found {len(stem_matches)} matching files",
+                        "",
+                    ]
+
+                    for path in stem_matches[:5]:
+                        output.append(
+                            path
+                        )
+
+                    return "\n".join(
+                        output
+                    )
+
+                fuzzy_matches.sort(
+                    key=lambda item: (
+                        item[0],
+                        -len(item[1]),
+                    ),
+                    reverse=True,
+                )
+
+                if fuzzy_matches:
+                    best_score = fuzzy_matches[0][0]
+
+                    if best_score >= 0.86:
+                        output = [
+                            f"Found a close match for '{requested_filename}'",
+                            "",
+                            fuzzy_matches[0][1],
+                        ]
+
+                        if len(fuzzy_matches) > 1:
+                            output.extend(
+                                [
+                                    "",
+                                    "Other possible matches:",
+                                ]
+                            )
+
+                            for _, path in fuzzy_matches[1:5]:
+                                output.append(
+                                    path
+                                )
+
+                        return "\n".join(
+                            output
+                        )
+
+                    if best_score >= 0.78:
+                        output = [
+                            f"I couldn't find an exact match for '{requested_filename}'.",
+                            "",
+                            "Possible matches:",
+                        ]
+
+                        for _, path in fuzzy_matches[:5]:
+                            output.append(
+                                path
+                            )
+
+                        return "\n".join(
+                            output
+                        )
+
+            exact_matches, fuzzy_matches = search_fallback()
+
+            if exact_matches:
+                if len(exact_matches) == 1:
+                    return (
+                        "Found file\n\n"
+                        f"{exact_matches[0]}"
+                    )
+
+                output = [
+                    f"Found {len(exact_matches)} matching files",
+                    "",
+                ]
+
+                for path in exact_matches[:5]:
+                    output.append(
+                        path
+                    )
+
+                return "\n".join(
+                    output
+                )
+
+            fuzzy_matches.sort(
+                key=lambda item: (
+                    item[0],
+                    -len(item[1]),
+                ),
+                reverse=True,
+            )
+
+            if fuzzy_matches:
+                strong_matches = [
+                    path
+                    for score, path in fuzzy_matches
+                    if score >= 0.86
+                ]
+
+                if strong_matches:
+                    output = [
+                        f"Found a close match for '{requested_filename}'",
+                        "",
+                        strong_matches[0],
+                    ]
+
+                    if len(strong_matches) > 1:
+                        output.extend(
+                            [
+                                "",
+                                "Other possible matches:",
+                            ]
+                        )
+
+                        for path in strong_matches[1:5]:
+                            output.append(
+                                path
+                            )
+
+                    return "\n".join(
+                        output
+                    )
+
+                possible_matches = [
+                    path
+                    for score, path in fuzzy_matches
+                    if score >= 0.78
+                ]
+
+                if possible_matches:
+                    output = [
+                        f"I couldn't find an exact match for '{requested_filename}'.",
+                        "",
+                        "Possible matches:",
+                    ]
+
+                    for path in possible_matches[:5]:
+                        output.append(
+                            path
+                        )
+
+                    return "\n".join(
+                        output
+                    )
+
+            return (
+                f"No file matching "
+                f"'{requested_filename}' "
+                f"was found on the PC."
+            )
+
+        except PermissionError:
+            return (
+                "I couldn't search some protected "
+                "folders because Windows denied access."
+            )
+
+        except OSError as exc:
+            return (
+                f"Could not search for the file: "
+                f"{exc}"
+            )
+
+        except Exception as exc:
+            return (
+                f"Could not search for the file: "
+                f"{exc}"
             )
 
     if name == "close_app":

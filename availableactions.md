@@ -27,3 +27,4 @@ network name (SSID), and link speed.
 * write_text_file: writes a text file. (requires confirmation)
 * open_file: opens the specified file. (requires confirmation)
 * confetti: sprays confetti over the Zanel UI. (requires confirmation)
+* search_file: searches for the specified file. (requires no confirmation)

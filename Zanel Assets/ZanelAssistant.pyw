@@ -35,7 +35,7 @@ import sounddevice as sd
 AI_URL = "https://evil-poppy-hardiness.ngrok-free.dev/chat"
 TRANSCRIBE_URL = "https://evil-poppy-hardiness.ngrok-free.dev/transcribe"
 
-ZANEL_VERSION = "1.24"
+ZANEL_VERSION = "1.25"
 
 GITHUB_LATEST_RELEASE_API = (
     "https://api.github.com/repos/"

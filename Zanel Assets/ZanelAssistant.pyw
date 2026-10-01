@@ -35,7 +35,7 @@ import sounddevice as sd
 AI_URL = "https://evil-poppy-hardiness.ngrok-free.dev/chat"
 TRANSCRIBE_URL = "https://evil-poppy-hardiness.ngrok-free.dev/transcribe"
 
-ZANEL_VERSION = "1.25"
+ZANEL_VERSION = "1.26"
 
 GITHUB_LATEST_RELEASE_API = (
     "https://api.github.com/repos/"
@@ -8464,13 +8464,21 @@ class ZanelApp:
             )
 
             if not response.ok:
+                error_message = self._get_server_error(
+                    response,
+                    "Transcription",
+                )
+
                 raise RuntimeError(
-                    f"Transcription server returned "
-                    f"HTTP {response.status_code}: "
-                    f"{response.text[:1000]}"
+                    error_message
                 )
 
             data = response.json()
+
+            if isinstance(data, dict) and data.get("error"):
+                raise RuntimeError(
+                    str(data["error"])
+                )
 
             text = str(
                 data.get("text") or ""
@@ -8481,12 +8489,52 @@ class ZanelApp:
 
             return text
 
+        except requests.Timeout:
+            self.messages.put(
+                (
+                    "text",
+                    "System",
+                    "Transcription server timed out.",
+                )
+            )
+            return ""
+
+        except requests.ConnectionError:
+            self.messages.put(
+                (
+                    "text",
+                    "System",
+                    "Transcription server is offline or unreachable.",
+                )
+            )
+            return ""
+
+        except requests.RequestException:
+            self.messages.put(
+                (
+                    "text",
+                    "System",
+                    "Transcription connection failed.",
+                )
+            )
+            return ""
+
+        except RuntimeError as exc:
+            self.messages.put(
+                (
+                    "text",
+                    "System",
+                    str(exc),
+                )
+            )
+            return ""
+
         except Exception as exc:
             self.messages.put(
                 (
                     "text",
                     "System",
-                    f"Transcription failed: {exc}"
+                    f"Transcription failed: {exc}",
                 )
             )
             return ""
@@ -12243,6 +12291,65 @@ class ZanelApp:
             daemon=True,
         ).start()
 
+    def _get_server_error(
+        self,
+        response=None,
+        service="AI",
+    ):
+        if response is None:
+            return f"{service} server is offline or unreachable."
+
+        status = response.status_code
+
+        try:
+            data = response.json()
+
+            if isinstance(data, dict):
+                error = data.get("error")
+
+                if error:
+                    return str(error).strip()
+
+                message = data.get("message")
+
+                if message:
+                    return str(message).strip()
+
+        except Exception:
+            pass
+
+        if status == 400:
+            return f"{service} request was invalid."
+
+        if status == 401:
+            return f"{service} API key was rejected."
+
+        if status == 403:
+            return f"{service} access was denied. Check your API key."
+
+        if status == 404:
+            return f"{service} endpoint was not found."
+
+        if status == 413:
+            return f"{service} request was too large."
+
+        if status == 429:
+            return f"{service} server rate limit reached. Try again later."
+
+        if status == 500:
+            return f"{service} server error."
+
+        if status == 502:
+            return f"{service} server returned a bad gateway response."
+
+        if status == 503:
+            return f"{service} server is unavailable."
+
+        if status == 504:
+            return f"{service} server timed out."
+
+        return f"{service} request failed with HTTP {status}."
+
     def ai_thread(
         self,
         text,
@@ -12287,12 +12394,17 @@ class ZanelApp:
             "model": "vision" if image_path else "normal",
             "user_id": USER_ID,
             "platform": PLATFORM,
-            "message": text or "Please analyze this screenshot.",
+            "message": (
+                text
+                or "Please analyze this screenshot."
+            ),
             "bot_name": BOT_NAME,
             "system_prompt": SYSTEM_PROMPT.replace(
                 "This session's Feedback ID is:",
-                f"This session's Feedback ID is: "
-                f"{self.feedback_id}",
+                (
+                    "This session's Feedback ID is: "
+                    f"{self.feedback_id}"
+                ),
             ),
         }
 
@@ -12379,7 +12491,22 @@ class ZanelApp:
 
             response.raise_for_status()
 
-            data = response.json()
+            try:
+                data = response.json()
+            except json.JSONDecodeError:
+                raise ValueError(
+                    "AI server returned invalid JSON."
+                )
+
+            if not isinstance(data, dict):
+                raise ValueError(
+                    "AI server returned an invalid response."
+                )
+
+            if data.get("error"):
+                raise ValueError(
+                    str(data["error"])
+                )
 
             reply = str(
                 data.get(
@@ -12446,47 +12573,79 @@ class ZanelApp:
                     spoken
                 )
 
-        except requests.HTTPError as exc:
-            body = ""
-
-            try:
-                if response is not None:
-                    body = response.text[:1000]
-            except Exception:
-                pass
-
+        except requests.HTTPError:
             self.messages.put(
                 (
                     "text",
                     "System",
-                    f"AI HTTP error: {exc}\n{body}",
+                    self._get_server_error(
+                        response,
+                        "AI",
+                    ),
+                )
+            )
+
+        except requests.Timeout:
+            self.messages.put(
+                (
+                    "text",
+                    "System",
+                    "AI server timed out.",
+                )
+            )
+
+        except requests.ConnectionError:
+            self.messages.put(
+                (
+                    "text",
+                    "System",
+                    "AI server is offline or unreachable.",
                 )
             )
 
         except requests.RequestException as exc:
+            error_message = str(
+                exc
+            ).strip()
+
             self.messages.put(
                 (
                     "text",
                     "System",
-                    f"AI connection error: {exc}",
+                    error_message
+                    or "AI connection failed.",
                 )
             )
 
-        except json.JSONDecodeError as exc:
+        except FileNotFoundError as exc:
             self.messages.put(
                 (
                     "text",
                     "System",
-                    f"AI returned invalid JSON: {exc}",
+                    str(exc),
+                )
+            )
+
+        except ValueError as exc:
+            self.messages.put(
+                (
+                    "text",
+                    "System",
+                    str(exc),
                 )
             )
 
         except Exception as exc:
+            error_message = str(
+                exc
+            ).strip()
+
             self.messages.put(
                 (
                     "text",
                     "System",
-                    f"AI error: {exc}",
+                    error_message
+                    or "An unexpected AI error occurred.",
                 )
             )
 
@@ -12498,19 +12657,6 @@ class ZanelApp:
                 )
 
             self.ai_busy = False
-
-            if (
-                self.running
-                and not self.tts_busy
-            ):
-                self.messages.put(
-                    (
-                        "state",
-                        "Mic Muted"
-                        if self.mic_muted
-                        else "Listening",
-                    )
-                )
 
             if (
                 self.running

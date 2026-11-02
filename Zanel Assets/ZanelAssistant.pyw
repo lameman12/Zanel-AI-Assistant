@@ -61,7 +61,7 @@ TTS_VOICES = [
     "en_US-sam-medium",
 ]
 
-ZANEL_VERSION = "1.27"
+ZANEL_VERSION = "1.30"
 
 GITHUB_LATEST_RELEASE_API = (
     "https://api.github.com/repos/"
@@ -164,7 +164,7 @@ When asked to close or stop yourself, interpret it as a request to close the Zan
 Important:
 - Only perform a computer action when the user's current message is an explicit
 request to perform that computer action. For example: if a user said "water" do not try typing "water" for them.
-- Never present internal action result codes to the user unless specifically asked
+- Never present internal action result codes to the user
 to explain the application's internal action system.
 - When an action result is returned, interpret it and respond naturally.
 - Be concise and practical.
@@ -8265,6 +8265,8 @@ class ZanelApp:
         self.last_clear_time = 0.0
         self.clear_cooldown = 7.0
         self.tts_busy = False
+        self.tts_skip = False
+        self.skip_visible = False
         self.silent_mode = False
         self.audio_level = 0.0
         self.messages = queue.Queue()
@@ -10308,7 +10310,115 @@ class ZanelApp:
 
         test_button.configure(command=test_voice)
 
-        def save_and_close():
+        saved_state = {
+            "voice": self.tts_voice,
+            "speak": not self.silent_mode,
+            "mic": not self.settings_mic_was_muted,
+        }
+
+        last_loaded = load_settings()
+
+        save_cooldown_seconds = 3.0
+        cooldown_state = {
+            "until": 0.0,
+            "job": None,
+        }
+
+        def in_cooldown():
+            return time.time() < cooldown_state["until"]
+
+        def has_changes():
+            return (
+                voice_var.get() != saved_state["voice"]
+                or bool(speak_var.get()) != saved_state["speak"]
+                or bool(mic_var.get()) != saved_state["mic"]
+            )
+
+        save_button = tk.Button(
+            buttons,
+            text="Save",
+            fg="#071019",
+            bg="#1A2520",
+            activeforeground="#071019",
+            activebackground="#72FFAB",
+            disabledforeground="#5B6660",
+            borderwidth=0,
+            relief="flat",
+            padx=18,
+            pady=8,
+            cursor="arrow",
+            font=("Segoe UI", 9, "bold"),
+            state="disabled",
+        )
+        save_button.pack(side="right")
+
+        def update_save_button(*_args):
+            try:
+                if in_cooldown():
+                    save_button.configure(
+                        text="Wait…",
+                        state="disabled",
+                        bg="#1A2520",
+                        cursor="arrow",
+                    )
+                elif has_changes():
+                    save_button.configure(
+                        text="Save",
+                        state="normal",
+                        bg="#5CFF9D",
+                        cursor="hand2",
+                    )
+                else:
+                    save_button.configure(
+                        text="Save",
+                        state="disabled",
+                        bg="#1A2520",
+                        cursor="arrow",
+                    )
+            except tk.TclError:
+                pass
+
+        def end_cooldown():
+            cooldown_state["job"] = None
+            cooldown_state["until"] = 0.0
+            update_save_button()
+
+        def start_cooldown():
+            if cooldown_state["job"] is not None:
+                try:
+                    save_button.after_cancel(cooldown_state["job"])
+                except tk.TclError:
+                    pass
+
+                cooldown_state["job"] = None
+
+            cooldown_state["until"] = (
+                time.time() + save_cooldown_seconds
+            )
+
+            try:
+                cooldown_state["job"] = save_button.after(
+                    int(save_cooldown_seconds * 1000),
+                    end_cooldown,
+                )
+            except tk.TclError:
+                cooldown_state["job"] = None
+                cooldown_state["until"] = 0.0
+
+        def save_changes():
+            if in_cooldown():
+                return
+
+            if not has_changes():
+                return
+
+            previous = (
+                self.tts_voice,
+                self.silent_mode,
+                self.settings_mic_was_muted,
+                self.saved_mic_muted,
+            )
+
             self.tts_voice = voice_var.get()
             self.silent_mode = not speak_var.get()
             self.settings_mic_was_muted = not mic_var.get()
@@ -10317,31 +10427,44 @@ class ZanelApp:
             saved = self.persist_settings()
 
             if not saved:
+                (
+                    self.tts_voice,
+                    self.silent_mode,
+                    self.settings_mic_was_muted,
+                    self.saved_mic_muted,
+                ) = previous
+
                 show_status(
                     "Could not save settings.",
                     "#FF6B7A",
                 )
                 return
 
-            self.close_settings(force=True)
+            saved_state["voice"] = self.tts_voice
+            saved_state["speak"] = not self.silent_mode
+            saved_state["mic"] = not self.settings_mic_was_muted
 
-        tk.Button(
-            buttons,
-            text="Save",
-            command=save_and_close,
-            fg="#071019",
-            bg="#5CFF9D",
-            activeforeground="#071019",
-            activebackground="#72FFAB",
-            borderwidth=0,
-            relief="flat",
-            padx=18,
-            pady=8,
-            cursor="hand2",
-            font=("Segoe UI", 9, "bold"),
-        ).pack(side="right")
+            try:
+                last_loaded.update(load_settings())
+            except Exception:
+                pass
 
-        last_loaded = load_settings()
+            if list_state["open"]:
+                close_voice_list()
+
+            start_cooldown()
+            update_save_button()
+
+            show_status(
+                "Settings saved.",
+                "#5CFF9D",
+            )
+
+        save_button.configure(command=save_changes)
+
+        voice_var.trace_add("write", update_save_button)
+        speak_var.trace_add("write", update_save_button)
+        mic_var.trace_add("write", update_save_button)
 
         def refresh_settings():
             if self.settings_frame is not frame:
@@ -10353,12 +10476,17 @@ class ZanelApp:
                 if current != last_loaded:
                     last_loaded.update(current)
 
+                    saved_state["voice"] = current["voice"]
+                    saved_state["speak"] = not current["silent_mode"]
+                    saved_state["mic"] = not current["mic_muted"]
+
                     voice_var.set(current["voice"])
                     speak_var.set(not current["silent_mode"])
                     mic_var.set(not current["mic_muted"])
                     self.settings_mic_was_muted = current["mic_muted"]
 
                     update_voice_arrow()
+                    update_save_button()
 
                 frame.after(5000, refresh_settings)
 
@@ -10497,6 +10625,70 @@ class ZanelApp:
         self.state.pack(
             side="right",
             padx=(8, 6),
+        )
+
+        self.skip_hover = False
+        self.skip_phase = 0
+        self.skip_pulse_job = None
+
+        pulse_start = (0x24, 0x5A, 0x41)
+        pulse_end = (0x5C, 0xFF, 0x9D)
+        pulse_steps = 10
+
+        pulse_forward = [
+            "#%02x%02x%02x" % tuple(
+                int(
+                    pulse_start[channel]
+                    + (pulse_end[channel] - pulse_start[channel])
+                    * step
+                    / pulse_steps
+                )
+                for channel in range(3)
+            )
+            for step in range(pulse_steps + 1)
+        ]
+
+        self.skip_pulse_colors = tuple(
+            pulse_forward + pulse_forward[-2:0:-1]
+        )
+
+        self.skip_button = tk.Frame(
+            self.titlebar,
+            bg=self.skip_pulse_colors[0],
+            highlightthickness=0,
+            bd=0,
+        )
+
+        self.skip_inner = tk.Button(
+            self.skip_button,
+            text="⏭  Skip TTS",
+            command=self.skip_tts,
+            fg="#5CFF9D",
+            bg="#0F1A15",
+            activeforeground="#071019",
+            activebackground="#3FD07F",
+            borderwidth=0,
+            highlightthickness=0,
+            relief="flat",
+            padx=9,
+            pady=2,
+            cursor="hand2",
+            font=("Segoe UI Symbol", 8, "bold"),
+        )
+
+        self.skip_inner.pack(
+            padx=1,
+            pady=1,
+        )
+
+        self.skip_inner.bind(
+            "<Enter>",
+            self.skip_hover_enter,
+        )
+
+        self.skip_inner.bind(
+            "<Leave>",
+            self.skip_hover_leave,
         )
 
         body = tk.Frame(
@@ -10852,244 +11044,212 @@ class ZanelApp:
             expand=True
         )
 
+        self.compact_canvas = canvas
+
         w = self.compact_width
         h = self.compact_height
         r = self.compact_radius
 
-        canvas.create_arc(
-            0,
-            0,
-            r * 2,
-            r * 2,
-            start=90,
-            extent=90,
+        def rounded_points(x1, y1, x2, y2, radius):
+            points = []
+
+            corners = (
+                (x2 - radius, y1 + radius, 270),
+                (x2 - radius, y2 - radius, 0),
+                (x1 + radius, y2 - radius, 90),
+                (x1 + radius, y1 + radius, 180),
+            )
+
+            for corner_x, corner_y, start in corners:
+                for step in range(0, 91, 6):
+                    angle = math.radians(start + step)
+
+                    points.extend(
+                        (
+                            corner_x + math.cos(angle) * radius,
+                            corner_y + math.sin(angle) * radius,
+                        )
+                    )
+
+            return points
+
+        canvas.create_polygon(
+            *rounded_points(0, 0, w - 1, h - 1, r),
+            fill="#1C2B23",
+            outline=""
+        )
+
+        canvas.create_polygon(
+            *rounded_points(2, 2, w - 3, h - 3, r - 2),
             fill="#0D1713",
-            outline="#0D1713"
+            outline=""
         )
 
-        canvas.create_arc(
-            w - r * 2,
-            0,
-            w,
-            r * 2,
-            start=0,
-            extent=90,
-            fill="#0D1713",
-            outline="#0D1713"
-        )
-
-        canvas.create_arc(
-            0,
-            h - r * 2,
-            r * 2,
-            h,
-            start=180,
-            extent=90,
-            fill="#0D1713",
-            outline="#0D1713"
-        )
-
-        canvas.create_arc(
-            w - r * 2,
-            h - r * 2,
-            w,
-            h,
-            start=270,
-            extent=90,
-            fill="#0D1713",
-            outline="#0D1713"
-        )
-
-        canvas.create_rectangle(
-            r,
-            0,
-            w - r,
-            h,
-            fill="#0D1713",
-            outline="#0D1713"
-        )
-
-        canvas.create_rectangle(
-            0,
-            r,
-            w,
-            h - r,
-            fill="#0D1713",
-            outline="#0D1713"
-        )
-
-        content = tk.Frame(
-            window,
-            bg="#0D1713",
-            bd=0,
-            highlightthickness=0
-        )
-
-        canvas.create_window(
+        canvas.create_text(
             w // 2,
-            h // 2,
-            window=content,
-            anchor="center",
-            width=w - 12,
-            height=h - 12
-        )
-
-        self.compact_canvas = canvas
-        self.compact_content = content
-
-        icon = tk.Label(
-            content,
+            66,
             text="⌬",
-            fg="#5CFF9D",
-            bg="#0D1713",
+            fill="#5CFF9D",
             font=(
                 "Segoe UI Symbol",
                 38,
                 "bold"
-            ),
-            bd=0,
-            highlightthickness=0
+            )
         )
 
-        icon.pack(
-            pady=(18, 0)
-        )
-
-        title = tk.Label(
-            content,
+        canvas.create_text(
+            w // 2,
+            116,
             text="Zanel Assistant",
-            fg="#F2F6FF",
-            bg="#0D1713",
+            fill="#F2F6FF",
             font=(
                 "Segoe UI",
                 11,
                 "bold"
-            ),
-            bd=0,
-            highlightthickness=0
+            )
         )
 
-        title.pack(
-            pady=(2, 0)
-        )
-
-        subtitle = tk.Label(
-            content,
+        canvas.create_text(
+            w // 2,
+            137,
             text="Minimised",
-            fg="#8290A8",
-            bg="#0D1713",
+            fill="#8290A8",
             font=(
                 "Segoe UI",
                 8
-            ),
-            bd=0,
-            highlightthickness=0
+            )
         )
 
-        subtitle.pack(
-            pady=(3, 0)
-        )
-
-        instruction = tk.Label(
-            content,
+        canvas.create_text(
+            w // 2,
+            160,
             text="Double-click to restore",
-            fg="#56677A",
-            bg="#0D1713",
+            fill="#56677A",
             font=(
                 "Segoe UI",
                 8
-            ),
-            bd=0,
-            highlightthickness=0
+            )
         )
 
-        instruction.pack(
-            pady=(7, 0)
+        button_x = w - 38
+        button_y = 32
+
+        hover_circle = canvas.create_oval(
+            button_x - 14,
+            button_y - 14,
+            button_x + 14,
+            button_y + 14,
+            fill="#0D1713",
+            outline="",
+            tags=("minbtn",)
         )
 
-        minimize = tk.Button(
-            content,
+        button_text = canvas.create_text(
+            button_x,
+            button_y,
             text="—",
-            command=self.minimize_compact_window,
-            fg="#A9B8B0",
-            bg="#0D1713",
-            activeforeground="#FFFFFF",
-            activebackground="#ffa500",
-            borderwidth=0,
-            highlightthickness=0,
-            relief="flat",
+            fill="#A9B8B0",
             font=(
                 "Segoe UI",
                 12
             ),
-            width=3,
-            padx=0,
-            pady=0,
-            cursor="hand2"
+            tags=("minbtn",)
         )
 
-        minimize.place(
-            relx=0.90,
-            rely=0.035,
-            anchor="n"
+        pressed = {"button": False}
+
+        def button_enter(_event=None):
+            try:
+                canvas.itemconfigure(
+                    hover_circle,
+                    fill="#ffa500"
+                )
+
+                canvas.itemconfigure(
+                    button_text,
+                    fill="#071019"
+                )
+
+                canvas.configure(
+                    cursor="hand2"
+                )
+            except tk.TclError:
+                pass
+
+        def button_leave(_event=None):
+            try:
+                canvas.itemconfigure(
+                    hover_circle,
+                    fill="#0D1713"
+                )
+
+                canvas.itemconfigure(
+                    button_text,
+                    fill="#A9B8B0"
+                )
+
+                canvas.configure(
+                    cursor=""
+                )
+            except tk.TclError:
+                pass
+
+        def on_press(event):
+            if "minbtn" in canvas.gettags("current"):
+                pressed["button"] = True
+                self.compact_dragging = False
+                return
+
+            pressed["button"] = False
+            self.compact_start_drag(event)
+
+        def on_release(event):
+            was_button = pressed["button"]
+            pressed["button"] = False
+
+            if was_button and "minbtn" in canvas.gettags("current"):
+                button_leave()
+                self.minimize_compact_window()
+                return
+
+            self.compact_stop_drag(event)
+
+        def on_double_click(event):
+            if "minbtn" in canvas.gettags("current"):
+                return
+
+            self.restore_window()
+
+        canvas.tag_bind(
+            "minbtn",
+            "<Enter>",
+            button_enter
         )
 
-        drag_widgets = [
-            canvas,
-            content,
-            icon,
-            title,
-            subtitle,
-            instruction
-        ]
+        canvas.tag_bind(
+            "minbtn",
+            "<Leave>",
+            button_leave
+        )
 
-        for widget in drag_widgets:
-            widget.bind(
-                "<ButtonPress-1>",
-                self.compact_start_drag,
-                add="+"
-            )
-
-            widget.bind(
-                "<B1-Motion>",
-                self.compact_drag_window,
-                add="+"
-            )
-
-            widget.bind(
-                "<ButtonRelease-1>",
-                self.compact_stop_drag,
-                add="+"
-            )
-
-            widget.bind(
-                "<Double-Button-1>",
-                self.restore_window,
-                add="+"
-            )
-
-        window.bind(
+        canvas.bind(
             "<ButtonPress-1>",
-            self.compact_start_drag,
-            add="+"
+            on_press
         )
 
-        window.bind(
+        canvas.bind(
             "<B1-Motion>",
-            self.compact_drag_window,
-            add="+"
+            self.compact_drag_window
         )
 
-        window.bind(
+        canvas.bind(
             "<ButtonRelease-1>",
-            self.compact_stop_drag,
-            add="+"
+            on_release
         )
 
-        window.bind(
+        canvas.bind(
             "<Double-Button-1>",
-            self.restore_window,
-            add="+"
+            on_double_click
         )
 
         window.bind(
@@ -11639,6 +11799,14 @@ class ZanelApp:
             f"{codepoints}.png"
         )
 
+    def place_emoji_image(self, photo):
+        self.chat.image_create(
+            "end",
+            image=photo,
+            align="center",
+            padx=1,
+        )
+
     def insert_emoji(self, emoji):
         try:
             if not hasattr(
@@ -11653,9 +11821,17 @@ class ZanelApp:
             ):
                 self._emoji_cache = {}
 
+            if not hasattr(
+                self,
+                "_emoji_failed"
+            ):
+                self._emoji_failed = set()
+
+            emoji_size = 16
+
             cache_key = (
                 emoji,
-                16
+                emoji_size
             )
 
             cached = self._emoji_cache.get(
@@ -11663,16 +11839,25 @@ class ZanelApp:
             )
 
             if cached is not None:
-                self.chat.image_create(
+                self.place_emoji_image(
+                    cached
+                )
+                return
+
+            if emoji in self._emoji_failed:
+                self.chat.insert(
                     "end",
-                    image=cached,
-                    align="baseline"
+                    emoji
                 )
                 return
 
             cache_dir = self.get_emoji_cache_dir()
 
             if cache_dir is None:
+                self._emoji_failed.add(
+                    emoji
+                )
+
                 self.chat.insert(
                     "end",
                     emoji
@@ -11697,6 +11882,10 @@ class ZanelApp:
                 )
 
                 if not url:
+                    self._emoji_failed.add(
+                        emoji
+                    )
+
                     self.chat.insert(
                         "end",
                         emoji
@@ -11723,6 +11912,10 @@ class ZanelApp:
                 if (
                     "image" not in content_type
                 ):
+                    self._emoji_failed.add(
+                        emoji
+                    )
+
                     self.chat.insert(
                         "end",
                         emoji
@@ -11757,20 +11950,27 @@ class ZanelApp:
                 "RGBA"
             )
 
-            image.thumbnail(
-                (16, 16),
-                Image.Resampling.LANCZOS
-            )
-
             if (
                 image.width < 1
                 or image.height < 1
             ):
+                self._emoji_failed.add(
+                    emoji
+                )
+
                 self.chat.insert(
                     "end",
                     emoji
                 )
                 return
+
+            image = image.resize(
+                (
+                    emoji_size,
+                    emoji_size,
+                ),
+                Image.Resampling.LANCZOS
+            )
 
             photo = ImageTk.PhotoImage(
                 image
@@ -11784,13 +11984,18 @@ class ZanelApp:
                 photo
             )
 
-            self.chat.image_create(
-                "end",
-                image=photo,
-                align="baseline"
+            self.place_emoji_image(
+                photo
             )
 
         except Exception:
+            try:
+                self._emoji_failed.add(
+                    emoji
+                )
+            except Exception:
+                pass
+
             self.chat.insert(
                 "end",
                 emoji
@@ -13016,6 +13221,10 @@ class ZanelApp:
                 )
             )
 
+            reply = self._clean_leaked_feedback(
+                reply
+            )
+
             action = self._extract_action(
                 reply
             )
@@ -13765,6 +13974,225 @@ class ZanelApp:
 
         return cleaned.strip()
 
+    def _clean_leaked_feedback(self, text):
+        if not text or not isinstance(text, str):
+            return ""
+
+        cleaned = text
+
+        start_pattern = (
+            r"\[\s*ACTION\s+RESULT\s+FROM\s+PREVIOUS\s+REQUEST\s*\]"
+        )
+
+        end_pattern = (
+            r"\[\s*END\s+ACTION\s+RESULT\s*\]"
+        )
+
+        cleaned = re.sub(
+            start_pattern + r"[\s\S]*?" + end_pattern,
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+
+        cleaned = re.sub(
+            start_pattern + r"[\s\S]*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+
+        cleaned = re.sub(
+            end_pattern,
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+
+        cleaned = re.sub(
+            r"(?im)^[ \t]*Feedback-?[ \t]*ID[ \t]*:.*"
+            r"(?:\n[ \t]*Action[ \t]*:.*)?"
+            r"(?:\n[ \t]*Result[ \t]*:.*)?$",
+            "",
+            cleaned,
+        )
+
+        feedback_id = getattr(
+            self,
+            "feedback_id",
+            "",
+        )
+
+        if feedback_id:
+            cleaned = cleaned.replace(
+                feedback_id,
+                "",
+            )
+
+        cleaned = re.sub(
+            r"\n{3,}",
+            "\n\n",
+            cleaned,
+        )
+
+        return cleaned.strip()
+
+    def skip_tts(self):
+        if not self.tts_busy:
+            return
+
+        self.tts_skip = True
+
+        try:
+            winsound.PlaySound(
+                None,
+                winsound.SND_PURGE,
+            )
+        except Exception:
+            pass
+
+        self.messages.put(
+            (
+                "state",
+                "Skipping speech…",
+            )
+        )
+
+    def update_skip_button(self):
+        try:
+            if not self.running:
+                return
+
+            if self.tts_busy:
+                if not self.skip_visible:
+                    self.reset_skip_button_style()
+
+                    self.skip_button.pack(
+                        side="right",
+                        padx=(0, 6),
+                        pady=8,
+                    )
+
+                    self.skip_visible = True
+                    self.start_skip_pulse()
+            else:
+                if self.skip_visible:
+                    self.skip_button.pack_forget()
+                    self.skip_visible = False
+                    self.stop_skip_pulse()
+                    self.reset_skip_button_style()
+
+        except (tk.TclError, AttributeError):
+            pass
+
+    def reset_skip_button_style(self):
+        self.skip_hover = False
+        self.skip_phase = 0
+
+        try:
+            self.skip_button.configure(
+                bg=self.skip_pulse_colors[0],
+            )
+
+            self.skip_inner.configure(
+                bg="#0F1A15",
+                fg="#5CFF9D",
+            )
+
+        except (tk.TclError, AttributeError):
+            pass
+
+    def skip_hover_enter(self, _event=None):
+        self.skip_hover = True
+
+        try:
+            self.skip_button.configure(
+                bg="#5CFF9D",
+            )
+
+            self.skip_inner.configure(
+                bg="#5CFF9D",
+                fg="#071019",
+            )
+
+        except (tk.TclError, AttributeError):
+            pass
+
+    def skip_hover_leave(self, _event=None):
+        self.skip_hover = False
+
+        try:
+            self.skip_button.configure(
+                bg=self.skip_pulse_colors[self.skip_phase],
+            )
+
+            self.skip_inner.configure(
+                bg="#0F1A15",
+                fg="#5CFF9D",
+            )
+
+        except (tk.TclError, AttributeError):
+            pass
+
+    def start_skip_pulse(self):
+        self.stop_skip_pulse()
+
+        try:
+            self.skip_pulse_job = self.root.after(
+                90,
+                self.skip_pulse_tick,
+            )
+        except (tk.TclError, AttributeError):
+            self.skip_pulse_job = None
+
+    def stop_skip_pulse(self):
+        job = getattr(
+            self,
+            "skip_pulse_job",
+            None,
+        )
+
+        self.skip_pulse_job = None
+
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except (tk.TclError, AttributeError):
+                pass
+
+    def skip_pulse_tick(self):
+        self.skip_pulse_job = None
+
+        if not self.running or not self.skip_visible:
+            return
+
+        try:
+            if not self.skip_hover:
+                self.skip_phase = (
+                    self.skip_phase + 1
+                ) % len(self.skip_pulse_colors)
+
+                self.skip_button.configure(
+                    bg=self.skip_pulse_colors[self.skip_phase],
+                )
+
+            self.skip_pulse_job = self.root.after(
+                90,
+                self.skip_pulse_tick,
+            )
+
+        except (tk.TclError, AttributeError):
+            self.skip_pulse_job = None
+
+    def refresh_skip_button(self):
+        try:
+            self.root.after(
+                0,
+                self.update_skip_button,
+            )
+        except (tk.TclError, RuntimeError):
+            pass
+
     def _speak(self, text, voice=None):
         if not text or not self.running:
             return
@@ -13797,6 +14225,9 @@ class ZanelApp:
                 return
 
             self.tts_busy = True
+            self.tts_skip = False
+
+        self.refresh_skip_button()
 
         mic_was_muted = self.mic_muted
 
@@ -13836,6 +14267,9 @@ class ZanelApp:
                     "TTS server returned empty audio."
                 )
 
+            if self.tts_skip or not self.running:
+                return
+
             fd, wav_path = tempfile.mkstemp(
                 suffix=".wav"
             )
@@ -13849,11 +14283,60 @@ class ZanelApp:
                     audio_bytes
                 )
 
-            if self.running:
+            duration = None
+
+            try:
+                import wave
+
+                with wave.open(
+                    wav_path,
+                    "rb",
+                ) as wav_file:
+                    frame_rate = wav_file.getframerate()
+
+                    if frame_rate > 0:
+                        duration = (
+                            wav_file.getnframes()
+                            / float(frame_rate)
+                        )
+            except Exception:
+                duration = None
+
+            if self.tts_skip or not self.running:
+                return
+
+            if duration is None:
                 winsound.PlaySound(
                     wav_path,
                     winsound.SND_FILENAME,
                 )
+            else:
+                winsound.PlaySound(
+                    wav_path,
+                    winsound.SND_FILENAME
+                    | winsound.SND_ASYNC,
+                )
+
+                end_time = (
+                    time.time()
+                    + duration
+                    + 0.5
+                )
+
+                while (
+                    self.running
+                    and not self.tts_skip
+                    and time.time() < end_time
+                ):
+                    time.sleep(0.05)
+
+                try:
+                    winsound.PlaySound(
+                        None,
+                        winsound.SND_PURGE,
+                    )
+                except Exception:
+                    pass
 
         except requests.Timeout:
             self.messages.put(
@@ -13899,6 +14382,9 @@ class ZanelApp:
                     pass
 
             self.tts_busy = False
+            self.tts_skip = False
+
+            self.refresh_skip_button()
 
             if not self.running:
                 return

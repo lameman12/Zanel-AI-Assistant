@@ -55,18 +55,21 @@ TTS_VOICES = [
     "en_US-kristin-medium",
     "en_US-lessac-high",
     "en_US-lessac-medium",
+    "en_US-miles-medium",
     "en_US-mike-medium",
     "en_US-norman-medium",
     "en_US-ryan-high",
     "en_US-sam-medium",
 ]
 
-ZANEL_VERSION = "1.30"
+ZANEL_VERSION = "1.31"
 
 GITHUB_LATEST_RELEASE_API = (
     "https://api.github.com/repos/"
     "lameman12/Zanel-AI-Assistant/releases/latest"
 )
+
+GITHUB_RELEASES_URL = "https://github.com/lameman12/Zanel-AI-Assistant/releases"
 
 APP_DATA_DIR = (
     Path.home()
@@ -138,6 +141,17 @@ MAX_RECORD_SECONDS = 30
 MAX_IDLE_SECONDS = 30
 TARGET_PEAK = 0.7
 MAX_GAIN = 10.0
+
+DEFAULT_OPACITY = 0.96
+MIN_OPACITY = 0.5
+FONT_SIZES = (9, 10, 11, 12, 13, 14)
+DEFAULT_FONT_SIZE = 10
+MIC_SENSITIVITY_LEVELS = {
+    "low": 0.010,
+    "medium": 0.005,
+    "high": 0.0025,
+}
+DEFAULT_MIC_SENSITIVITY = "medium"
 
 ALLOW_SHELL_COMMANDS = True
 
@@ -761,6 +775,10 @@ def load_settings():
         "voice": DEFAULT_TTS_VOICE,
         "silent_mode": False,
         "mic_muted": False,
+        "opacity": DEFAULT_OPACITY,
+        "always_on_top": True,
+        "font_size": DEFAULT_FONT_SIZE,
+        "mic_sensitivity": DEFAULT_MIC_SENSITIVITY,
     }
 
     try:
@@ -784,6 +802,35 @@ def load_settings():
                 settings["mic_muted"] = bool(
                     data.get("mic_muted", False)
                 )
+
+                try:
+                    opacity = float(
+                        data.get("opacity", DEFAULT_OPACITY)
+                    )
+
+                    if MIN_OPACITY <= opacity <= 1.0:
+                        settings["opacity"] = round(opacity, 2)
+                except (TypeError, ValueError):
+                    pass
+
+                settings["always_on_top"] = bool(
+                    data.get("always_on_top", True)
+                )
+
+                try:
+                    font_size = int(
+                        data.get("font_size", DEFAULT_FONT_SIZE)
+                    )
+
+                    if font_size in FONT_SIZES:
+                        settings["font_size"] = font_size
+                except (TypeError, ValueError):
+                    pass
+
+                sensitivity = data.get("mic_sensitivity")
+
+                if sensitivity in MIC_SENSITIVITY_LEVELS:
+                    settings["mic_sensitivity"] = sensitivity
 
     except Exception:
         pass
@@ -8220,6 +8267,329 @@ def execute_action(action, root, mic_callback, app=None):
 
     return f"Unknown action: {name}"
 
+def blend_color(start, end, amount):
+    amount = max(0.0, min(1.0, amount))
+
+    start_rgb = (
+        int(start[1:3], 16),
+        int(start[3:5], 16),
+        int(start[5:7], 16),
+    )
+
+    end_rgb = (
+        int(end[1:3], 16),
+        int(end[3:5], 16),
+        int(end[5:7], 16),
+    )
+
+    return "#%02x%02x%02x" % tuple(
+        int(start_rgb[index] + (end_rgb[index] - start_rgb[index]) * amount)
+        for index in range(3)
+    )
+
+
+class ModernSlider(tk.Canvas):
+    def __init__(
+        self,
+        parent,
+        variable,
+        from_,
+        to,
+        height=32,
+        bg="#0B0E14",
+        track="#24332B",
+        fill="#5CFF9D",
+        handle="#5CFF9D",
+        handle_active="#D8FFE9",
+        glow="#2F8F63",
+    ):
+        super().__init__(
+            parent,
+            height=height,
+            bg=bg,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+
+        self.variable = variable
+        self.from_ = from_
+        self.to = to
+        self.bg_color = bg
+        self.track_color = track
+        self.fill_color = fill
+        self.handle_color = handle
+        self.handle_active_color = handle_active
+        self.glow_color = glow
+
+        self.pad = 18
+        self.pos = None
+        self.radius = 8.0
+        self.glow_level = 0.0
+        self.hover = False
+        self.dragging = False
+        self.job = None
+        self.trace_id = None
+
+        try:
+            self.trace_id = self.variable.trace_add(
+                "write",
+                self.on_variable,
+            )
+        except tk.TclError:
+            self.trace_id = None
+
+        self.bind("<Configure>", self.on_configure)
+        self.bind("<Enter>", self.on_enter)
+        self.bind("<Leave>", self.on_leave)
+        self.bind("<ButtonPress-1>", self.on_press)
+        self.bind("<B1-Motion>", self.on_motion)
+        self.bind("<ButtonRelease-1>", self.on_release)
+        self.bind("<Destroy>", self.on_destroy)
+
+    def current_value(self):
+        try:
+            value = float(self.variable.get())
+        except (tk.TclError, ValueError, TypeError):
+            value = float(self.from_)
+
+        return max(
+            float(self.from_),
+            min(float(self.to), value),
+        )
+
+    def usable_width(self):
+        return max(
+            1.0,
+            float(self.winfo_width()) - self.pad * 2,
+        )
+
+    def target_x(self):
+        span = max(
+            1.0,
+            float(self.to) - float(self.from_),
+        )
+
+        ratio = (
+            self.current_value()
+            - float(self.from_)
+        ) / span
+
+        return self.pad + ratio * self.usable_width()
+
+    def x_to_value(self, x):
+        span = float(self.to) - float(self.from_)
+
+        ratio = (
+            float(x) - self.pad
+        ) / self.usable_width()
+
+        ratio = max(0.0, min(1.0, ratio))
+
+        return int(
+            round(float(self.from_) + ratio * span)
+        )
+
+    def on_configure(self, _event=None):
+        self.pos = self.target_x()
+        self.draw()
+
+    def on_variable(self, *_args):
+        self.start_animation()
+
+    def on_enter(self, _event=None):
+        self.hover = True
+        self.start_animation()
+
+    def on_leave(self, _event=None):
+        self.hover = False
+        self.start_animation()
+
+    def on_press(self, event):
+        self.dragging = True
+        self.set_from_x(event.x)
+        self.start_animation()
+
+    def on_motion(self, event):
+        if not self.dragging:
+            return
+
+        self.set_from_x(event.x)
+
+    def on_release(self, _event=None):
+        self.dragging = False
+        self.start_animation()
+
+    def set_from_x(self, x):
+        value = self.x_to_value(x)
+
+        try:
+            if int(self.variable.get()) != value:
+                self.variable.set(value)
+            else:
+                self.start_animation()
+        except (tk.TclError, ValueError):
+            pass
+
+    def on_destroy(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+
+        if self.job is not None:
+            try:
+                self.after_cancel(self.job)
+            except tk.TclError:
+                pass
+
+            self.job = None
+
+        if self.trace_id is not None:
+            try:
+                self.variable.trace_remove(
+                    "write",
+                    self.trace_id,
+                )
+            except (tk.TclError, ValueError):
+                pass
+
+            self.trace_id = None
+
+    def start_animation(self):
+        if self.job is not None:
+            return
+
+        try:
+            self.job = self.after(
+                16,
+                self.step,
+            )
+        except tk.TclError:
+            self.job = None
+
+    def step(self):
+        self.job = None
+
+        try:
+            if not self.winfo_exists():
+                return
+
+            target = self.target_x()
+
+            if self.pos is None:
+                self.pos = target
+
+            position_ease = 0.5 if self.dragging else 0.22
+
+            self.pos += (target - self.pos) * position_ease
+
+            if self.dragging:
+                target_radius = 12.0
+                target_glow = 1.0
+            elif self.hover:
+                target_radius = 10.0
+                target_glow = 0.55
+            else:
+                target_radius = 8.0
+                target_glow = 0.0
+
+            self.radius += (target_radius - self.radius) * 0.25
+            self.glow_level += (target_glow - self.glow_level) * 0.2
+
+            settled = (
+                abs(target - self.pos) < 0.3
+                and abs(target_radius - self.radius) < 0.05
+                and abs(target_glow - self.glow_level) < 0.01
+            )
+
+            if settled:
+                self.pos = target
+                self.radius = target_radius
+                self.glow_level = target_glow
+                self.draw()
+                return
+
+            self.draw()
+
+            self.job = self.after(
+                16,
+                self.step,
+            )
+
+        except tk.TclError:
+            self.job = None
+
+    def draw(self):
+        try:
+            self.delete("all")
+
+            width = float(self.winfo_width())
+            height = float(self.winfo_height())
+
+            if width <= self.pad * 2 or height <= 1:
+                return
+
+            if self.pos is None:
+                self.pos = self.target_x()
+
+            center_y = height / 2
+
+            self.create_line(
+                self.pad,
+                center_y,
+                width - self.pad,
+                center_y,
+                fill=self.track_color,
+                width=6,
+                capstyle=tk.ROUND,
+            )
+
+            if self.pos - self.pad > 0.5:
+                self.create_line(
+                    self.pad,
+                    center_y,
+                    self.pos,
+                    center_y,
+                    fill=self.fill_color,
+                    width=6,
+                    capstyle=tk.ROUND,
+                )
+
+            glow_radius = (
+                self.radius
+                + 3
+                + 7 * self.glow_level
+            )
+
+            self.create_oval(
+                self.pos - glow_radius,
+                center_y - glow_radius,
+                self.pos + glow_radius,
+                center_y + glow_radius,
+                fill=blend_color(
+                    self.bg_color,
+                    self.glow_color,
+                    0.25 + 0.75 * self.glow_level,
+                ),
+                outline="",
+            )
+
+            self.create_oval(
+                self.pos - self.radius,
+                center_y - self.radius,
+                self.pos + self.radius,
+                center_y + self.radius,
+                fill=blend_color(
+                    self.handle_color,
+                    self.handle_active_color,
+                    self.glow_level,
+                ),
+                outline=self.bg_color,
+                width=2,
+            )
+
+        except tk.TclError:
+            pass
+
 def find_data_folder():
     candidates = []
 
@@ -8251,7 +8621,7 @@ class ZanelApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("")
-        self.root.geometry("450x390+40+80")
+        self.root.geometry("450x420+40+80")
         self.root.configure(bg="#0b0e14")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -8277,6 +8647,10 @@ class ZanelApp:
         settings = load_settings()
         self.tts_voice = settings["voice"]
         self.silent_mode = settings["silent_mode"]
+        self.opacity = settings["opacity"]
+        self.always_on_top = settings["always_on_top"]
+        self.font_size = settings["font_size"]
+        self.mic_sensitivity = settings["mic_sensitivity"]
         self.settings_frame = None
         self.settings_mic_was_muted = False
         self.saved_mic_muted = settings["mic_muted"]
@@ -8301,12 +8675,23 @@ class ZanelApp:
         self.compact_drag_y = 0
         self.rickroll_process = None
         self.rickroll_lock = threading.Lock()
+        self.update_lock = threading.Lock()
+        self.update_info = {
+            "status": "unknown",
+            "checking": False,
+            "failed": False,
+            "latest": "",
+            "url": GITHUB_RELEASES_URL,
+            "checked_at": 0.0,
+        }
         self.compact_dragging = False
         self.minimize_transition = False
         self.restore_transition = False
         self.api_key = self.load_api_key()
 
         self.build_ui()
+        self.apply_window_settings()
+        self.apply_chat_font()
 
         if self.mic_muted:
             self.set_mic(True)
@@ -8809,7 +9194,20 @@ class ZanelApp:
         return tuple(numbers)
     
 
-    def check_for_updates(self):
+    def begin_update_check(self):
+        with self.update_lock:
+            if self.update_info.get("checking"):
+                return False
+
+            self.update_info["checking"] = True
+            return True
+
+    def run_update_check(self):
+        status = "error"
+        latest_version = ""
+        release_url = GITHUB_RELEASES_URL
+        succeeded = False
+
         try:
             response = requests.get(
                 GITHUB_LATEST_RELEASE_API,
@@ -8826,42 +9224,122 @@ class ZanelApp:
                     f"GitHub HTTP {response.status_code}",
                     flush=True
                 )
-                return
+            else:
+                data = response.json()
 
-            data = response.json()
+                if isinstance(data, dict):
+                    latest_version = str(
+                        data.get("tag_name") or ""
+                    ).strip()
 
-            latest_version = str(
-                data.get("tag_name") or ""
-            ).strip()
+                    release_url = str(
+                        data.get("html_url")
+                        or GITHUB_RELEASES_URL
+                    ).strip()
 
-            release_url = str(
-                data.get("html_url") or
-                "https://github.com/lameman12/Zanel-AI-Assistant/releases"
-            ).strip()
+                if not latest_version:
+                    print(
+                        "Version check failed: no release version found",
+                        flush=True
+                    )
+                else:
+                    current = self.parse_version(
+                        ZANEL_VERSION
+                    )
 
-            if not latest_version:
-                print(
-                    "Version check failed: no release version found",
-                    flush=True
-                )
-                return
+                    latest = self.parse_version(
+                        latest_version
+                    )
 
-            current = self.parse_version(
-                ZANEL_VERSION
-            )
+                    print(
+                        f"Zanel version: {ZANEL_VERSION} | "
+                        f"Latest version: {latest_version}",
+                        flush=True
+                    )
 
-            latest = self.parse_version(
-                latest_version
-            )
+                    if latest > current:
+                        status = "outdated"
+                    else:
+                        status = "current"
 
+                    succeeded = True
+
+        except requests.RequestException as e:
             print(
-                f"Zanel version: {ZANEL_VERSION} | "
-                f"Latest version: {latest_version}",
+                f"Version check network error: {e}",
                 flush=True
             )
 
-            if latest <= current:
+        except Exception as e:
+            print(
+                f"Version check error: {e}",
+                flush=True
+            )
+
+        with self.update_lock:
+            previous = dict(self.update_info)
+
+            if succeeded:
+                self.update_info = {
+                    "status": status,
+                    "checking": False,
+                    "failed": False,
+                    "latest": latest_version,
+                    "url": release_url or GITHUB_RELEASES_URL,
+                    "checked_at": time.time(),
+                }
+            else:
+                self.update_info = {
+                    **previous,
+                    "checking": False,
+                    "failed": True,
+                    "checked_at": time.time(),
+                }
+
+            return dict(self.update_info)
+
+    def fetch_update_info(self):
+        if self.begin_update_check():
+            return self.run_update_check()
+
+        deadline = time.time() + 15
+
+        while time.time() < deadline:
+            with self.update_lock:
+                info = dict(self.update_info)
+
+            if not info.get("checking"):
+                return info
+
+            time.sleep(0.25)
+
+        with self.update_lock:
+            return dict(self.update_info)
+        
+
+    def start_update_check_async(self):
+        if not self.begin_update_check():
+            return False
+
+        threading.Thread(
+            target=self.run_update_check,
+            daemon=True,
+        ).start()
+
+        return True
+
+    def check_for_updates(self):
+        try:
+            info = self.fetch_update_info()
+
+            if info.get("status") != "outdated":
                 return
+
+            latest_version = info.get("latest") or "Unknown"
+            release_url = (
+                info.get("url")
+                or GITHUB_RELEASES_URL
+            )
 
             message = (
                 "Your version of Zanel is outdated.\n\n"
@@ -8888,12 +9366,6 @@ class ZanelApp:
                         f"Could not open update page: {e}",
                         flush=True
                     )
-
-        except requests.RequestException as e:
-            print(
-                f"Version check network error: {e}",
-                flush=True
-            )
 
         except Exception as e:
             print(
@@ -9277,12 +9749,53 @@ class ZanelApp:
             )
         )
 
+    def apply_window_settings(self, opacity=None, topmost=None):
+        if opacity is None:
+            opacity = self.opacity
+
+        if topmost is None:
+            topmost = self.always_on_top
+
+        try:
+            self.root.attributes("-alpha", float(opacity))
+        except (tk.TclError, ValueError, TypeError):
+            pass
+
+        try:
+            self.root.attributes("-topmost", bool(topmost))
+        except tk.TclError:
+            pass
+
+    def apply_chat_font(self, size=None):
+        if size is None:
+            size = self.font_size
+
+        try:
+            size = int(size)
+            self.chat.configure(font=("Segoe UI", size))
+            self.chat.tag_configure(
+                "bold",
+                font=("Segoe UI", size, "bold"),
+            )
+            self.chat.tag_configure(
+                "italic",
+                font=("Segoe UI", size, "italic"),
+            )
+            self.root.update_idletasks()
+            self.chat.see("end")
+        except (tk.TclError, ValueError, TypeError):
+            pass
+
     def persist_settings(self):
         return save_settings(
             {
                 "voice": self.tts_voice,
                 "silent_mode": self.silent_mode,
                 "mic_muted": self.saved_mic_muted,
+                "opacity": self.opacity,
+                "always_on_top": self.always_on_top,
+                "font_size": self.font_size,
+                "mic_sensitivity": self.mic_sensitivity,
             }
         )
 
@@ -9874,6 +10387,9 @@ class ZanelApp:
         except tk.TclError:
             pass
 
+        self.apply_window_settings()
+        self.apply_chat_font()
+
         if (
             not self.settings_mic_was_muted
             and self.running
@@ -10148,6 +10664,10 @@ class ZanelApp:
 
         speak_var = tk.BooleanVar(value=not self.silent_mode)
 
+        mic_var = tk.BooleanVar(
+            value=not self.settings_mic_was_muted
+        )
+
         tk.Checkbutton(
             body,
             text="Speak responses aloud",
@@ -10159,13 +10679,10 @@ class ZanelApp:
             activebackground="#0B0E14",
             highlightthickness=0,
             borderwidth=0,
+            pady=0,
             font=("Segoe UI", 10),
             cursor="hand2",
-        ).pack(anchor="w", pady=(10, 0))
-
-        mic_var = tk.BooleanVar(
-            value=not self.settings_mic_was_muted
-        )
+        ).pack(anchor="w", pady=(6, 0))
 
         tk.Checkbutton(
             body,
@@ -10178,9 +10695,303 @@ class ZanelApp:
             activebackground="#0B0E14",
             highlightthickness=0,
             borderwidth=0,
+            pady=0,
             font=("Segoe UI", 10),
             cursor="hand2",
-        ).pack(anchor="w", pady=(2, 0))
+        ).pack(anchor="w", pady=(0, 0))
+
+        adv_body = tk.Frame(frame, bg="#0B0E14")
+
+        opacity_var = tk.IntVar(
+            value=int(round(self.opacity * 100))
+        )
+        top_var = tk.BooleanVar(value=self.always_on_top)
+        font_var = tk.IntVar(value=self.font_size)
+        sens_var = tk.StringVar(value=self.mic_sensitivity)
+
+        opacity_label = tk.Label(
+            adv_body,
+            text=f"Window opacity: {opacity_var.get()}%",
+            fg="#F2F6FF",
+            bg="#0B0E14",
+            font=("Segoe UI", 10, "bold"),
+        )
+        opacity_label.pack(anchor="w")
+
+        ModernSlider(
+            adv_body,
+            variable=opacity_var,
+            from_=int(MIN_OPACITY * 100),
+            to=100,
+        ).pack(fill="x", pady=(2, 6))
+
+        tk.Checkbutton(
+            adv_body,
+            text="Keep window on top",
+            variable=top_var,
+            fg="#E8F5ED",
+            bg="#0B0E14",
+            selectcolor="#121A16",
+            activeforeground="#FFFFFF",
+            activebackground="#0B0E14",
+            highlightthickness=0,
+            borderwidth=0,
+            pady=0,
+            font=("Segoe UI", 10),
+            cursor="hand2",
+        ).pack(anchor="w", pady=(0, 6))
+
+        font_label = tk.Label(
+            adv_body,
+            text=f"Chat text size: {font_var.get()}",
+            fg="#F2F6FF",
+            bg="#0B0E14",
+            font=("Segoe UI", 10, "bold"),
+        )
+        font_label.pack(anchor="w")
+
+        ModernSlider(
+            adv_body,
+            variable=font_var,
+            from_=min(FONT_SIZES),
+            to=max(FONT_SIZES),
+        ).pack(fill="x", pady=(2, 6))
+
+        tk.Label(
+            adv_body,
+            text="Microphone sensitivity",
+            fg="#F2F6FF",
+            bg="#0B0E14",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w")
+
+        sens_row = tk.Frame(adv_body, bg="#0B0E14")
+        sens_row.pack(anchor="w", pady=(0, 6))
+
+        for sens_text, sens_value in (
+            ("Low", "low"),
+            ("Medium", "medium"),
+            ("High", "high"),
+        ):
+            tk.Radiobutton(
+                sens_row,
+                text=sens_text,
+                value=sens_value,
+                variable=sens_var,
+                fg="#E8F5ED",
+                bg="#0B0E14",
+                selectcolor="#121A16",
+                activeforeground="#FFFFFF",
+                activebackground="#0B0E14",
+                highlightthickness=0,
+                borderwidth=0,
+                font=("Segoe UI", 10),
+                cursor="hand2",
+            ).pack(side="left", padx=(0, 14))
+
+        adv_row = tk.Frame(adv_body, bg="#0B0E14")
+        adv_row.pack(anchor="w", fill="x")
+
+        adv_status = tk.Label(
+            adv_row,
+            text="",
+            fg="#8290A8",
+            bg="#0B0E14",
+            font=("Segoe UI", 9),
+            wraplength=240,
+            justify="left",
+        )
+
+        adv_status_job = {"id": None}
+
+        def show_adv_status(text, color="#8290A8"):
+            if adv_status_job["id"] is not None:
+                try:
+                    adv_status.after_cancel(adv_status_job["id"])
+                except tk.TclError:
+                    pass
+
+                adv_status_job["id"] = None
+
+            def clear_adv_status():
+                adv_status_job["id"] = None
+
+                try:
+                    adv_status.configure(text="")
+                except tk.TclError:
+                    pass
+
+            try:
+                adv_status.configure(text=text, fg=color)
+                adv_status_job["id"] = adv_status.after(
+                    4000,
+                    clear_adv_status,
+                )
+            except tk.TclError:
+                pass
+
+        def reset_advanced_defaults():
+            opacity_var.set(int(round(DEFAULT_OPACITY * 100)))
+            top_var.set(True)
+            font_var.set(DEFAULT_FONT_SIZE)
+            sens_var.set(DEFAULT_MIC_SENSITIVITY)
+            show_adv_status("Defaults restored. Press Save.")
+
+        tk.Button(
+            adv_row,
+            text="Restore defaults",
+            command=reset_advanced_defaults,
+            fg="#DDF8E8",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#22312A",
+            borderwidth=0,
+            relief="flat",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+
+        adv_status.pack(side="left", padx=(10, 0))
+
+        def preview_opacity(*_args):
+            try:
+                value = int(opacity_var.get())
+                opacity_label.configure(
+                    text=f"Window opacity: {value}%"
+                )
+                self.apply_window_settings(opacity=value / 100.0)
+            except (tk.TclError, ValueError):
+                pass
+
+        def preview_top(*_args):
+            try:
+                self.apply_window_settings(
+                    topmost=bool(top_var.get())
+                )
+            except (tk.TclError, ValueError):
+                pass
+
+        def preview_font(*_args):
+            try:
+                value = int(font_var.get())
+                font_label.configure(
+                    text=f"Chat text size: {value}"
+                )
+                self.apply_chat_font(value)
+            except (tk.TclError, ValueError):
+                pass
+
+        opacity_var.trace_add("write", preview_opacity)
+        top_var.trace_add("write", preview_top)
+        font_var.trace_add("write", preview_font)
+
+        tab_state = {"page": "general"}
+
+        general_tab = tk.Button(
+            header,
+            text="General",
+            fg="#071019",
+            bg="#5CFF9D",
+            activeforeground="#071019",
+            activebackground="#72FFAB",
+            borderwidth=0,
+            relief="flat",
+            padx=10,
+            pady=6,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        )
+
+        advanced_tab = tk.Button(
+            header,
+            text="Advanced",
+            fg="#DDF8E8",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#22312A",
+            borderwidth=0,
+            relief="flat",
+            padx=10,
+            pady=6,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        )
+
+        advanced_tab.pack(side="right")
+        general_tab.pack(side="right", padx=(0, 6))
+
+        def style_tabs():
+            active = {
+                "bg": "#5CFF9D",
+                "fg": "#071019",
+                "activebackground": "#72FFAB",
+                "activeforeground": "#071019",
+            }
+
+            inactive = {
+                "bg": "#1A2520",
+                "fg": "#DDF8E8",
+                "activebackground": "#22312A",
+                "activeforeground": "white",
+            }
+
+            try:
+                general_tab.configure(
+                    **(
+                        active
+                        if tab_state["page"] == "general"
+                        else inactive
+                    )
+                )
+
+                advanced_tab.configure(
+                    **(
+                        active
+                        if tab_state["page"] == "advanced"
+                        else inactive
+                    )
+                )
+            except tk.TclError:
+                pass
+
+        def show_tab(page):
+            if page == tab_state["page"]:
+                return
+
+            if list_state["open"]:
+                close_voice_list()
+
+            try:
+                if page == "advanced":
+                    body.pack_forget()
+                    adv_body.pack(
+                        fill="both",
+                        expand=True,
+                        padx=22,
+                        pady=(12, 0),
+                    )
+                else:
+                    adv_body.pack_forget()
+                    body.pack(
+                        fill="both",
+                        expand=True,
+                        padx=22,
+                        pady=(12, 0),
+                    )
+            except tk.TclError:
+                return
+
+            tab_state["page"] = page
+            style_tabs()
+
+        general_tab.configure(
+            command=lambda: show_tab("general")
+        )
+        advanced_tab.configure(
+            command=lambda: show_tab("advanced")
+        )
 
         status = tk.Label(
             body,
@@ -10225,7 +11036,10 @@ class ZanelApp:
         def open_data_folder():
             def restore_topmost():
                 try:
-                    self.root.attributes("-topmost", True)
+                    self.root.attributes(
+                        "-topmost",
+                        bool(self.always_on_top),
+                    )
                 except tk.TclError:
                     pass
 
@@ -10255,8 +11069,11 @@ class ZanelApp:
             finally:
                 self.root.after(3000, restore_topmost)
 
+        button_row = tk.Frame(body, bg="#0B0E14")
+        button_row.pack(anchor="w", fill="x", pady=(8, 0))
+
         tk.Button(
-            body,
+            button_row,
             text="Open Data File",
             command=open_data_folder,
             fg="#DDF8E8",
@@ -10269,9 +11086,266 @@ class ZanelApp:
             pady=8,
             cursor="hand2",
             font=("Segoe UI", 9, "bold"),
-        ).pack(anchor="w", pady=(10, 0))
+        ).pack(side="left")
 
-        status.pack(anchor="w", pady=(6, 0))
+        check_button = tk.Button(
+            button_row,
+            text="Check for updates",
+            width=15,
+            fg="#DDF8E8",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#22312A",
+            disabledforeground="#8290A8",
+            borderwidth=0,
+            relief="flat",
+            padx=8,
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        )
+        check_button.pack(side="left", padx=(8, 0))
+
+        update_button = tk.Button(
+            button_row,
+            text="Get update",
+            fg="#071019",
+            bg="#5CFF9D",
+            activeforeground="#071019",
+            activebackground="#72FFAB",
+            borderwidth=0,
+            relief="flat",
+            padx=12,
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        )
+
+        version_label = tk.Label(
+            body,
+            text="",
+            fg="#8290A8",
+            bg="#0B0E14",
+            font=("Segoe UI", 8),
+            anchor="w",
+            justify="left",
+        )
+        version_label.pack(anchor="w", pady=(6, 0))
+
+        status.pack(anchor="w", pady=(2, 0))
+
+        check_cooldown_seconds = 10.0
+        check_min_display_seconds = 0.8
+        auto_check_interval_ms = 300000
+        check_state = {
+            "until": 0.0,
+            "min_until": 0.0,
+            "manual": False,
+        }
+        version_job = {"id": None}
+        auto_job = {"id": None}
+        update_visible = {"value": False}
+
+        def open_release_page():
+            with self.update_lock:
+                url = (
+                    self.update_info.get("url")
+                    or GITHUB_RELEASES_URL
+                )
+
+            try:
+                webbrowser.open(url)
+            except Exception as exc:
+                show_status(
+                    f"Could not open page: {exc}",
+                    "#FF6B7A",
+                )
+
+        def render_version():
+            previous_job = version_job["id"]
+            version_job["id"] = None
+
+            if previous_job is not None:
+                try:
+                    frame.after_cancel(previous_job)
+                except tk.TclError:
+                    pass
+
+            if self.settings_frame is not frame:
+                return
+
+            try:
+                with self.update_lock:
+                    info = dict(self.update_info)
+
+                now = time.time()
+                state_value = info.get("status")
+                checking = bool(info.get("checking"))
+                failed = bool(info.get("failed"))
+                latest_value = str(
+                    info.get("latest") or "Unknown"
+                ).lstrip("vV")
+                version_text = f"Version {ZANEL_VERSION}"
+
+                showing_check = (
+                    check_state["manual"]
+                    and (
+                        checking
+                        or now < check_state["min_until"]
+                    )
+                )
+
+                if (
+                    check_state["manual"]
+                    and not checking
+                    and now >= check_state["min_until"]
+                ):
+                    check_state["manual"] = False
+
+                if showing_check or (
+                    checking and state_value == "unknown"
+                ):
+                    text = (
+                        f"{version_text}  •  "
+                        "Checking for updates…"
+                    )
+                    color = "#8290A8"
+                elif failed:
+                    text = (
+                        f"{version_text}  •  "
+                        "Check failed. Check your connection."
+                    )
+                    color = "#FF6B7A"
+                elif state_value == "outdated":
+                    text = (
+                        f"{version_text}  •  "
+                        f"Update available: {latest_value}"
+                    )
+                    color = "#FFB347"
+                elif state_value == "current":
+                    text = (
+                        f"{version_text}  •  Up to date"
+                    )
+                    color = "#5CFF9D"
+                else:
+                    text = (
+                        f"{version_text}  •  "
+                        "Not checked yet"
+                    )
+                    color = "#8290A8"
+
+                version_label.configure(
+                    text=text,
+                    fg=color,
+                )
+
+                remaining = check_state["until"] - now
+                cooling = remaining > 0
+
+                if showing_check or checking:
+                    check_button.configure(
+                        text="Checking…",
+                        state="disabled",
+                        cursor="arrow",
+                    )
+                elif cooling:
+                    check_button.configure(
+                        text=f"Wait {math.ceil(remaining)}s",
+                        state="disabled",
+                        cursor="arrow",
+                    )
+                else:
+                    check_button.configure(
+                        text="Check for updates",
+                        state="normal",
+                        cursor="hand2",
+                    )
+
+                should_show_update = (
+                    state_value == "outdated"
+                    and not showing_check
+                )
+
+                if should_show_update:
+                    if not update_visible["value"]:
+                        update_button.pack(
+                            side="left",
+                            padx=(8, 0),
+                        )
+                        update_visible["value"] = True
+                else:
+                    if update_visible["value"]:
+                        update_button.pack_forget()
+                        update_visible["value"] = False
+
+                if checking or showing_check or cooling:
+                    version_job["id"] = frame.after(
+                        250,
+                        render_version,
+                    )
+
+            except tk.TclError:
+                pass
+
+        def start_check():
+            now = time.time()
+
+            if now < check_state["until"]:
+                return
+
+            if self.start_update_check_async():
+                check_state["until"] = (
+                    now + check_cooldown_seconds
+                )
+                check_state["min_until"] = (
+                    now + check_min_display_seconds
+                )
+                check_state["manual"] = True
+
+            render_version()
+
+        def auto_check():
+            auto_job["id"] = None
+
+            if self.settings_frame is not frame:
+                return
+
+            try:
+                self.start_update_check_async()
+                render_version()
+
+                auto_job["id"] = frame.after(
+                    auto_check_interval_ms,
+                    auto_check,
+                )
+
+            except tk.TclError:
+                pass
+
+        check_button.configure(command=start_check)
+        update_button.configure(command=open_release_page)
+
+        with self.update_lock:
+            last_status = self.update_info.get("status")
+            last_failed = self.update_info.get("failed")
+            last_checked = self.update_info.get(
+                "checked_at",
+                0.0,
+            )
+
+        if (
+            last_status == "unknown"
+            or last_failed
+            or time.time() - last_checked > 60
+        ):
+            self.start_update_check_async()
+
+        render_version()
+
+        auto_job["id"] = frame.after(
+            auto_check_interval_ms,
+            auto_check,
+        )
 
         test_button = tk.Button(
             buttons,
@@ -10314,6 +11388,10 @@ class ZanelApp:
             "voice": self.tts_voice,
             "speak": not self.silent_mode,
             "mic": not self.settings_mic_was_muted,
+            "opacity": int(round(self.opacity * 100)),
+            "top": self.always_on_top,
+            "font": self.font_size,
+            "sens": self.mic_sensitivity,
         }
 
         last_loaded = load_settings()
@@ -10332,6 +11410,10 @@ class ZanelApp:
                 voice_var.get() != saved_state["voice"]
                 or bool(speak_var.get()) != saved_state["speak"]
                 or bool(mic_var.get()) != saved_state["mic"]
+                or int(opacity_var.get()) != saved_state["opacity"]
+                or bool(top_var.get()) != saved_state["top"]
+                or int(font_var.get()) != saved_state["font"]
+                or sens_var.get() != saved_state["sens"]
             )
 
         save_button = tk.Button(
@@ -10417,12 +11499,20 @@ class ZanelApp:
                 self.silent_mode,
                 self.settings_mic_was_muted,
                 self.saved_mic_muted,
+                self.opacity,
+                self.always_on_top,
+                self.font_size,
+                self.mic_sensitivity,
             )
 
             self.tts_voice = voice_var.get()
             self.silent_mode = not speak_var.get()
             self.settings_mic_was_muted = not mic_var.get()
             self.saved_mic_muted = self.settings_mic_was_muted
+            self.opacity = round(int(opacity_var.get()) / 100.0, 2)
+            self.always_on_top = bool(top_var.get())
+            self.font_size = int(font_var.get())
+            self.mic_sensitivity = sens_var.get()
 
             saved = self.persist_settings()
 
@@ -10432,9 +11522,17 @@ class ZanelApp:
                     self.silent_mode,
                     self.settings_mic_was_muted,
                     self.saved_mic_muted,
+                    self.opacity,
+                    self.always_on_top,
+                    self.font_size,
+                    self.mic_sensitivity,
                 ) = previous
 
                 show_status(
+                    "Could not save settings.",
+                    "#FF6B7A",
+                )
+                show_adv_status(
                     "Could not save settings.",
                     "#FF6B7A",
                 )
@@ -10443,6 +11541,10 @@ class ZanelApp:
             saved_state["voice"] = self.tts_voice
             saved_state["speak"] = not self.silent_mode
             saved_state["mic"] = not self.settings_mic_was_muted
+            saved_state["opacity"] = int(round(self.opacity * 100))
+            saved_state["top"] = self.always_on_top
+            saved_state["font"] = self.font_size
+            saved_state["sens"] = self.mic_sensitivity
 
             try:
                 last_loaded.update(load_settings())
@@ -10459,12 +11561,20 @@ class ZanelApp:
                 "Settings saved.",
                 "#5CFF9D",
             )
+            show_adv_status(
+                "Settings saved.",
+                "#5CFF9D",
+            )
 
         save_button.configure(command=save_changes)
 
         voice_var.trace_add("write", update_save_button)
         speak_var.trace_add("write", update_save_button)
         mic_var.trace_add("write", update_save_button)
+        opacity_var.trace_add("write", update_save_button)
+        top_var.trace_add("write", update_save_button)
+        font_var.trace_add("write", update_save_button)
+        sens_var.trace_add("write", update_save_button)
 
         def refresh_settings():
             if self.settings_frame is not frame:
@@ -10479,10 +11589,22 @@ class ZanelApp:
                     saved_state["voice"] = current["voice"]
                     saved_state["speak"] = not current["silent_mode"]
                     saved_state["mic"] = not current["mic_muted"]
+                    saved_state["opacity"] = int(
+                        round(current["opacity"] * 100)
+                    )
+                    saved_state["top"] = current["always_on_top"]
+                    saved_state["font"] = current["font_size"]
+                    saved_state["sens"] = current["mic_sensitivity"]
 
                     voice_var.set(current["voice"])
                     speak_var.set(not current["silent_mode"])
                     mic_var.set(not current["mic_muted"])
+                    opacity_var.set(
+                        int(round(current["opacity"] * 100))
+                    )
+                    top_var.set(current["always_on_top"])
+                    font_var.set(current["font_size"])
+                    sens_var.set(current["mic_sensitivity"])
                     self.settings_mic_was_muted = current["mic_muted"]
 
                     update_voice_arrow()
@@ -10558,18 +11680,28 @@ class ZanelApp:
         title.bind("<ButtonPress-1>", self.start_drag)
         title.bind("<B1-Motion>", self.drag_window)
 
+        self.titlebar_pixel = tk.PhotoImage(
+            width=1,
+            height=1,
+        )
+
         close_button = tk.Button(
             self.titlebar,
             text="×",
             command=self.close,
+            image=self.titlebar_pixel,
+            compound="center",
+            width=46,
+            height=42,
             fg="#b9c2d0",
             bg="#0D1713",
             activeforeground="white",
             activebackground="#c43f52",
             borderwidth=0,
             highlightthickness=0,
-            font=("Segoe UI", 15),
-            width=3,
+            padx=0,
+            pady=0,
+            font=("Segoe UI Symbol", 13),
             cursor="hand2",
         )
         close_button.pack(
@@ -10581,14 +11713,19 @@ class ZanelApp:
             self.titlebar,
             text="—",
             command=self.minimize_window,
+            image=self.titlebar_pixel,
+            compound="center",
+            width=46,
+            height=42,
             fg="#b9c2d0",
             bg="#0D1713",
             activeforeground="white",
             activebackground="#ffa500",
             borderwidth=0,
             highlightthickness=0,
-            font=("Segoe UI", 13),
-            width=3,
+            padx=0,
+            pady=0,
+            font=("Segoe UI Symbol", 13),
             cursor="hand2",
         )
         minimize.pack(
@@ -10600,14 +11737,19 @@ class ZanelApp:
             self.titlebar,
             text="⚙",
             command=self.open_settings,
+            image=self.titlebar_pixel,
+            compound="center",
+            width=46,
+            height=42,
             fg="#b9c2d0",
             bg="#0D1713",
             activeforeground="white",
             activebackground="#2d405c",
             borderwidth=0,
             highlightthickness=0,
+            padx=0,
+            pady=0,
             font=("Segoe UI Symbol", 13),
-            width=3,
             cursor="hand2",
         )
         settings_button.pack(
@@ -10695,15 +11837,28 @@ class ZanelApp:
             self.root,
             bg="#0B0E14",
         )
-        
+
         body.pack(
             fill="both",
             expand=True,
         )
 
+        controls = tk.Frame(
+            body,
+            bg="#0b0e14",
+        )
+
+        controls.pack(
+            side="bottom",
+            fill="x",
+            padx=10,
+            pady=(0, 8),
+        )
+
         self.chat = tk.Text(
             body,
-            height=15,
+            height=1,
+            width=1,
             wrap="word",
             state="disabled",
             bg="#101713",
@@ -10728,20 +11883,11 @@ class ZanelApp:
         )
 
         self.chat.pack(
+            side="top",
             fill="both",
             expand=True,
             padx=10,
             pady=10,
-        )
-
-        controls = tk.Frame(
-            body,
-            bg="#0b0e14",
-        )
-        controls.pack(
-            fill="x",
-            padx=10,
-            pady=(0, 8),
         )
 
         self.mic_button = tk.Button(
@@ -11503,7 +12649,7 @@ class ZanelApp:
             try:
                 self.root.attributes(
                     "-topmost",
-                    True
+                    bool(self.always_on_top)
                 )
             except tk.TclError:
                 pass
@@ -12820,7 +13966,10 @@ class ZanelApp:
                         rms * 12
                     )
 
-                    is_speech = rms >= ENERGY_THRESHOLD
+                    is_speech = rms >= MIC_SENSITIVITY_LEVELS.get(
+                        self.mic_sensitivity,
+                        ENERGY_THRESHOLD,
+                    )
 
                     if not started:
                         pre_roll.append(chunk)
@@ -14405,5 +15554,11 @@ class ZanelApp:
 
 if __name__ == "__main__":
     app = ZanelApp()
-    app.root.after(500, lambda: app.check_for_updates())
+    app.root.after(
+        500,
+        lambda: threading.Thread(
+            target=app.check_for_updates,
+            daemon=True,
+        ).start(),
+    )
     app.run()

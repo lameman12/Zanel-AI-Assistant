@@ -32,3 +32,4 @@ import unicodedata
 import sounddevice as sd
 from pycaw.pycaw import AudioUtilities
 from collections import deque
+import colorsys

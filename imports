@@ -10,6 +10,7 @@ import random
 import time
 import tkinter as tk
 import tkinter.messagebox as messagebox
+import tkinter.font as tkfont
 import webbrowser
 import math
 import platform
@@ -19,6 +20,8 @@ import urllib.request
 import uuid
 import pyautogui
 import ctypes
+import hashlib
+import ctypes.wintypes
 import pyperclip
 import re
 from datetime import datetime

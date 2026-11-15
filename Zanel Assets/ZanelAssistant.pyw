@@ -10,6 +10,7 @@ import random
 import time
 import tkinter as tk
 import tkinter.messagebox as messagebox
+import tkinter.font as tkfont
 import webbrowser
 from collections import deque
 import math
@@ -17,7 +18,9 @@ import winsound
 import getpass
 import urllib.request
 import uuid
+import ctypes.wintypes
 import pyautogui
+import hashlib
 import pyperclip
 import re
 from datetime import datetime
@@ -28,6 +31,7 @@ import platform
 import unicodedata
 import ctypes
 import sys
+import colorsys
 
 import numpy as np
 import requests
@@ -62,7 +66,7 @@ TTS_VOICES = [
     "en_US-sam-medium",
 ]
 
-ZANEL_VERSION = "1.31"
+ZANEL_VERSION = "1.33"
 
 GITHUB_LATEST_RELEASE_API = (
     "https://api.github.com/repos/"
@@ -70,6 +74,7 @@ GITHUB_LATEST_RELEASE_API = (
 )
 
 GITHUB_RELEASES_URL = "https://github.com/lameman12/Zanel-AI-Assistant/releases"
+OFFICIAL_WEBSITE_URL = "https://zanel-assistant.pages.dev/"
 
 APP_DATA_DIR = (
     Path.home()
@@ -87,6 +92,594 @@ SETTINGS_FILE = (
     APP_DATA_DIR
     / "settings.json"
 )
+
+WINDOW_FILE = APP_DATA_DIR / "window.json"
+
+DEFAULT_WINDOW_WIDTH = 450
+DEFAULT_WINDOW_HEIGHT = 420
+MIN_WINDOW_WIDTH = 380
+MIN_WINDOW_HEIGHT = 320
+SIDEBAR_WIDTH = 215
+RAIL_WIDTH = 18
+
+MAX_CHATS = 10
+CHAT_CREATE_COOLDOWN = 4.0
+CHAT_SWITCH_COOLDOWN = 1.2
+CHAT_DELETE_COOLDOWN = 1.5
+HISTORY_INITIAL = 40
+HISTORY_PAGE = 30
+HISTORY_BATCH = 8
+RECENT_IMAGE_LIMIT = 6
+MAX_STORED_MESSAGES = 2000
+
+PASTE_THRESHOLD_CHARS = 300
+PASTE_THRESHOLD_LINES = 5
+PASTE_MAX_CHARS = 6000
+MAX_SERVER_MESSAGE_CHARS = 6500
+VIEWER_CHUNK_CHARS = 6000
+LONG_REPLY_CHARS = 700
+LONG_REPLY_LINES = 14
+LONG_REPLY_MAX_CHARS = 60000
+PREVIEW_CHARS = 240
+
+INPUT_PLACEHOLDER = "Ask Zanel anything"
+DEFAULT_CHAT_NAME = "New chat"
+ANON_CHAT_NAME = "Anonymous chat"
+
+MESSAGES_CLEAR_URL = "https://evil-poppy-hardiness.ngrok-free.dev/messages/clear"
+ANON_ID = "Un--set404"
+RENAME_MAX_CHARS = 32
+RENAME_COOLDOWN = 5.0
+SEND_COOLDOWN = 4.0
+
+HEX_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+CHAT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.wintypes.DWORD),
+        ("rcMonitor", ctypes.wintypes.RECT),
+        ("rcWork", ctypes.wintypes.RECT),
+        ("dwFlags", ctypes.wintypes.DWORD),
+    ]
+
+
+def new_hash():
+    return hashlib.sha256(os.urandom(32)).hexdigest()
+
+
+def new_chat_id():
+    return os.urandom(16).hex()
+
+
+def make_entry(who, text, paste=None, image=None):
+    return {
+        "who": str(who)[:40],
+        "text": str(text),
+        "paste": paste or None,
+        "image": image or None,
+        "time": time.time(),
+    }
+
+
+def load_window_state():
+    state = {
+        "width": DEFAULT_WINDOW_WIDTH,
+        "height": DEFAULT_WINDOW_HEIGHT,
+        "x": None,
+        "y": None,
+        "maximized": False,
+        "sidebar_open": False,
+    }
+
+    try:
+        if WINDOW_FILE.is_file():
+            data = json.loads(WINDOW_FILE.read_text(encoding="utf-8"))
+
+            if isinstance(data, dict):
+                for key, low in (
+                    ("width", MIN_WINDOW_WIDTH),
+                    ("height", MIN_WINDOW_HEIGHT),
+                ):
+                    value = data.get(key)
+
+                    if (
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and low <= value <= 10000
+                    ):
+                        state[key] = value
+
+                for key in ("x", "y"):
+                    value = data.get(key)
+
+                    if (
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and -10000 <= value <= 20000
+                    ):
+                        state[key] = value
+
+                state["maximized"] = bool(data.get("maximized", False))
+                state["sidebar_open"] = bool(data.get("sidebar_open", False))
+
+    except Exception:
+        pass
+
+    return state
+
+
+def save_window_state(state):
+    try:
+        APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        temp = WINDOW_FILE.with_suffix(".tmp")
+        temp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        os.replace(temp, WINDOW_FILE)
+        return True
+    except Exception:
+        return False
+
+
+class ChatStore:
+    def __init__(self, base_dir):
+        self.base = Path(base_dir)
+        self.dir = self.base / "chats"
+        self.images_dir = self.base / "chat_images"
+        self.index_file = self.dir / "index.json"
+        self.pending_file = self.dir / "pending_clear.json"
+        self.lock = threading.RLock()
+        self.chats = {}
+        self.anon = {}
+        self.anon_messages = {}
+        self.pending = []
+        self.last_active = None
+        self.dirty = False
+        self._load()
+
+    @staticmethod
+    def _read_json(path, default):
+        try:
+            if path.is_file():
+                return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+        return default
+
+    @staticmethod
+    def _write_json(path, data):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_suffix(path.suffix + ".tmp")
+            temp.write_text(
+                json.dumps(data, ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+            os.replace(temp, path)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _clean_meta(chat_id, meta):
+        if not CHAT_ID_PATTERN.match(str(chat_id)) or not isinstance(meta, dict):
+            return None
+
+        user_id = str(meta.get("user_id", ""))
+        platform = str(meta.get("platform", ""))
+
+        if not HEX_ID_PATTERN.match(user_id) or not HEX_ID_PATTERN.match(platform):
+            return None
+
+        now = time.time()
+
+        def number(value, default):
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return float(value)
+
+            return default
+
+        name = " ".join(
+            str(meta.get("name") or DEFAULT_CHAT_NAME).split()
+        )[:60] or DEFAULT_CHAT_NAME
+
+        return {
+            "id": chat_id,
+            "name": name,
+            "created": number(meta.get("created"), now),
+            "updated": number(meta.get("updated"), now),
+            "user_id": user_id,
+            "platform": platform,
+            "named": bool(meta.get("named", False)),
+            "anonymous": False,
+            "server_used": bool(meta.get("server_used", False)),
+        }
+
+    @staticmethod
+    def _normalize_entry(item):
+        if not isinstance(item, dict):
+            return None
+
+        who = item.get("who")
+        text = item.get("text")
+
+        if not isinstance(who, str) or not who or not isinstance(text, str):
+            return None
+
+        paste = item.get("paste")
+        image = item.get("image")
+        stamp = item.get("time")
+
+        return {
+            "who": who[:40],
+            "text": text,
+            "paste": paste if isinstance(paste, str) and paste else None,
+            "image": image if isinstance(image, str) and image else None,
+            "time": float(stamp)
+            if isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
+            else time.time(),
+        }
+
+    def _chat_file(self, chat_id):
+        return self.dir / f"{chat_id}.jsonl"
+
+    def _load(self):
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+
+        data = self._read_json(self.index_file, {})
+
+        if not isinstance(data, dict):
+            data = {}
+
+        raw = data.get("chats", {})
+
+        if isinstance(raw, dict):
+            for chat_id, meta in raw.items():
+                cleaned = self._clean_meta(chat_id, meta)
+
+                if cleaned and len(self.chats) < MAX_CHATS:
+                    self.chats[chat_id] = cleaned
+
+        last = data.get("last_active")
+
+        if isinstance(last, str) and last in self.chats:
+            self.last_active = last
+
+        pending = self._read_json(self.pending_file, [])
+
+        if isinstance(pending, list):
+            for item in pending:
+                if (
+                    isinstance(item, dict)
+                    and HEX_ID_PATTERN.match(str(item.get("user_id", "")))
+                    and HEX_ID_PATTERN.match(str(item.get("platform", "")))
+                ):
+                    entry = {
+                        "user_id": str(item["user_id"]),
+                        "platform": str(item["platform"]),
+                    }
+
+                    if entry not in self.pending:
+                        self.pending.append(entry)
+
+        self._remove_orphans()
+
+    def _remove_orphans(self):
+        try:
+            for path in self.dir.glob("*.jsonl"):
+                if path.stem not in self.chats:
+                    path.unlink()
+        except OSError:
+            pass
+
+        try:
+            if self.images_dir.is_dir():
+                for sub in self.images_dir.iterdir():
+                    if sub.is_dir() and sub.name not in self.chats:
+                        shutil.rmtree(sub, ignore_errors=True)
+        except OSError:
+            pass
+
+    def _save_index(self):
+        self._write_json(
+            self.index_file,
+            {
+                "version": 1,
+                "last_active": self.last_active,
+                "chats": self.chats,
+            },
+        )
+        self.dirty = False
+
+    def _add_pending_locked(self, meta):
+        item = {
+            "user_id": meta["user_id"],
+            "platform": meta["platform"],
+        }
+
+        if item not in self.pending:
+            self.pending.append(item)
+            self._write_json(self.pending_file, self.pending)
+
+    def flush(self):
+        with self.lock:
+            if self.dirty:
+                self._save_index()
+
+    def count(self):
+        with self.lock:
+            return len(self.chats) + len(self.anon)
+
+    def list_chats(self):
+        with self.lock:
+            items = [dict(meta) for meta in self.chats.values()]
+            items.extend(dict(meta) for meta in self.anon.values())
+
+        items.sort(key=lambda meta: meta["created"], reverse=True)
+        return items
+
+    def get_chat(self, chat_id):
+        with self.lock:
+            meta = self.chats.get(chat_id) or self.anon.get(chat_id)
+            return dict(meta) if meta else None
+
+    def create(self, anonymous=False):
+        with self.lock:
+            if len(self.chats) + len(self.anon) >= MAX_CHATS:
+                return None
+
+            if anonymous and self.anon:
+                return None
+
+            chat_id = new_chat_id()
+
+            while chat_id in self.chats or chat_id in self.anon:
+                chat_id = new_chat_id()
+
+            now = time.time()
+
+            meta = {
+                "id": chat_id,
+                "name": ANON_CHAT_NAME if anonymous else DEFAULT_CHAT_NAME,
+                "created": now,
+                "updated": now,
+                "user_id": ANON_ID if anonymous else new_hash(),
+                "platform": ANON_ID if anonymous else new_hash(),
+                "named": bool(anonymous),
+                "anonymous": bool(anonymous),
+                "server_used": False,
+            }
+
+            if anonymous:
+                self.anon[chat_id] = meta
+                self.anon_messages[chat_id] = []
+            else:
+                self.chats[chat_id] = meta
+                self._save_index()
+
+            return dict(meta)
+
+    def anonymous_id(self):
+        with self.lock:
+            for chat_id in self.anon:
+                return chat_id
+
+            return None
+
+    def has_messages(self, chat_id):
+        with self.lock:
+            if chat_id in self.anon:
+                return bool(self.anon_messages.get(chat_id))
+
+            if chat_id not in self.chats:
+                return False
+
+            try:
+                path = self._chat_file(chat_id)
+                return path.is_file() and path.stat().st_size > 0
+            except OSError:
+                return False
+
+    def messages(self, chat_id):
+        with self.lock:
+            if chat_id in self.anon:
+                return list(self.anon_messages.get(chat_id, []))
+
+            if chat_id not in self.chats:
+                return []
+
+            path = self._chat_file(chat_id)
+            items = []
+
+            if not path.is_file():
+                return items
+
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as file:
+                    for line in file:
+                        line = line.strip()
+
+                        if not line:
+                            continue
+
+                        try:
+                            entry = self._normalize_entry(json.loads(line))
+                        except ValueError:
+                            continue
+
+                        if entry:
+                            items.append(entry)
+            except OSError:
+                return items
+
+            if len(items) > MAX_STORED_MESSAGES + 500:
+                items = items[-MAX_STORED_MESSAGES:]
+
+                try:
+                    temp = path.with_suffix(".tmp")
+
+                    with open(temp, "w", encoding="utf-8") as file:
+                        for entry in items:
+                            file.write(
+                                json.dumps(entry, ensure_ascii=False) + "\n"
+                            )
+
+                    os.replace(temp, path)
+                except OSError:
+                    pass
+
+            return items
+
+    def append(self, chat_id, entry):
+        with self.lock:
+            entry = self._normalize_entry(entry)
+
+            if entry is None:
+                return False
+
+            if chat_id in self.anon:
+                items = self.anon_messages.setdefault(chat_id, [])
+                items.append(entry)
+
+                if len(items) > MAX_STORED_MESSAGES:
+                    del items[: len(items) - MAX_STORED_MESSAGES]
+
+                self.anon[chat_id]["updated"] = time.time()
+                return True
+
+            meta = self.chats.get(chat_id)
+
+            if meta is None:
+                return False
+
+            try:
+                self.dir.mkdir(parents=True, exist_ok=True)
+
+                with open(
+                    self._chat_file(chat_id),
+                    "a",
+                    encoding="utf-8",
+                ) as file:
+                    file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            except OSError:
+                return False
+
+            meta["updated"] = time.time()
+            self.dirty = True
+            return True
+
+    def mark_server_used(self, chat_id):
+        with self.lock:
+            meta = self.anon.get(chat_id) or self.chats.get(chat_id)
+
+            if meta is None or meta.get("server_used"):
+                return
+
+            meta["server_used"] = True
+
+            if chat_id in self.anon:
+                return
+
+            self._save_index()
+
+    def rename(self, chat_id, name, named=True):
+        name = " ".join(str(name).split())[:60] or DEFAULT_CHAT_NAME
+
+        with self.lock:
+            meta = self.chats.get(chat_id)
+
+            if meta is not None:
+                meta["name"] = name
+                meta["named"] = bool(named)
+                self._save_index()
+                return True
+
+            meta = self.anon.get(chat_id)
+
+            if meta is not None:
+                meta["name"] = name
+                meta["named"] = bool(named)
+                return True
+
+            return False
+
+    def set_last_active(self, chat_id):
+        with self.lock:
+            if chat_id in self.chats and self.last_active != chat_id:
+                self.last_active = chat_id
+                self._save_index()
+
+    def delete(self, chat_id):
+        with self.lock:
+            meta = self.chats.pop(chat_id, None)
+            anonymous = False
+
+            if meta is None:
+                meta = self.anon.pop(chat_id, None)
+                self.anon_messages.pop(chat_id, None)
+                anonymous = True
+
+            if meta is None:
+                return None
+
+            if not anonymous:
+                try:
+                    self._chat_file(chat_id).unlink()
+                except OSError:
+                    pass
+
+                shutil.rmtree(self.images_dir / chat_id, ignore_errors=True)
+
+                if self.last_active == chat_id:
+                    self.last_active = None
+
+                if meta.get("server_used"):
+                    self._add_pending_locked(meta)
+
+                self._save_index()
+
+            return meta
+
+    def save_thumbnail(self, chat_id, source):
+        with self.lock:
+            if chat_id in self.anon or not source or not os.path.isfile(source):
+                return source
+
+            if chat_id not in self.chats:
+                return None
+
+            try:
+                folder = self.images_dir / chat_id
+                folder.mkdir(parents=True, exist_ok=True)
+
+                image = Image.open(source).convert("RGB")
+                image.thumbnail((280, 200), Image.Resampling.LANCZOS)
+
+                target = folder / f"{int(time.time() * 1000)}.jpg"
+                image.save(target, "JPEG", quality=80)
+
+                return str(target)
+            except Exception:
+                return None
+
+    def pending_items(self):
+        with self.lock:
+            return [dict(item) for item in self.pending]
+
+    def remove_pending(self, item):
+        with self.lock:
+            target = {
+                "user_id": item["user_id"],
+                "platform": item["platform"],
+            }
+
+            if target in self.pending:
+                self.pending.remove(target)
+                self._write_json(self.pending_file, self.pending)
 
 USER_ID = getpass.getuser()
 PLATFORM = platform.system()
@@ -152,6 +745,175 @@ MIC_SENSITIVITY_LEVELS = {
     "high": 0.0025,
 }
 DEFAULT_MIC_SENSITIVITY = "medium"
+
+DEFAULT_THEME_NAME = "Emerald"
+DEFAULT_THEME_ACCENT = "#5CFF9D"
+
+DEFAULT_THEME = {
+    "bg": "#0B0E14",
+    "title": "#0D1713",
+    "panel": "#101713",
+    "field": "#121A16",
+    "button": "#1A2520",
+    "button_hover": "#22312A",
+    "mic": "#17241D",
+    "upload": "#17211D",
+    "mic_press": "#013220",
+    "skip": "#0F1A15",
+    "border": "#293830",
+    "track": "#24332B",
+    "glow": "#2F8F63",
+    "accent": "#5CFF9D",
+    "accent_hover": "#72FFAB",
+    "accent_press": "#3FD07F",
+}
+
+THEME_PRESETS = {
+    "Emerald": "#5CFF9D",
+    "Ocean": "#4DA3FF",
+    "Violet": "#A66CFF",
+    "Rose": "#FF5C8A",
+    "Amber": "#FFB347",
+    "Cyan": "#3FE0E0",
+    "Crimson": "#FF4D4D",
+    "Slate": "#B0B8C4",
+}
+
+THEME_WIDGET_OPTIONS = (
+    "bg",
+    "fg",
+    "activebackground",
+    "activeforeground",
+    "highlightbackground",
+    "highlightcolor",
+    "selectcolor",
+    "selectbackground",
+    "selectforeground",
+    "insertbackground",
+    "disabledforeground",
+    "troughcolor",
+)
+
+
+def normalize_hex(value):
+    value = str(value or "").strip().lower()
+
+    if re.fullmatch(r"#[0-9a-f]{6}", value):
+        return value
+
+    return None
+
+
+def hsl_hex(h, s, l):
+    r, g, b = colorsys.hls_to_rgb(
+        h,
+        max(0.0, min(1.0, l)),
+        max(0.0, min(1.0, s)),
+    )
+
+    return "#%02x%02x%02x" % (
+        int(round(r * 255)),
+        int(round(g * 255)),
+        int(round(b * 255)),
+    )
+
+
+def hex_to_hsv(value):
+    value = normalize_hex(value) or DEFAULT_THEME_ACCENT.lower()
+
+    r, g, b = (
+        int(value[index:index + 2], 16) / 255.0
+        for index in (1, 3, 5)
+    )
+
+    return colorsys.rgb_to_hsv(r, g, b)
+
+
+def hsv_to_hex(h, s, v):
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+
+    return "#%02x%02x%02x" % (
+        int(round(r * 255)),
+        int(round(g * 255)),
+        int(round(b * 255)),
+    )
+
+
+def build_theme(accent):
+    accent = normalize_hex(accent) or DEFAULT_THEME_ACCENT.lower()
+
+    r, g, b = (
+        int(accent[index:index + 2], 16) / 255.0
+        for index in (1, 3, 5)
+    )
+
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    l = max(0.55, min(0.75, l))
+    base_s = min(0.3, s)
+
+    steps = {
+        "bg": 0.050,
+        "panel": 0.068,
+        "title": 0.075,
+        "skip": 0.082,
+        "field": 0.088,
+        "upload": 0.095,
+        "mic": 0.102,
+        "button": 0.112,
+        "mic_press": 0.125,
+        "button_hover": 0.150,
+        "track": 0.175,
+        "border": 0.200,
+    }
+
+    theme = {
+        key: hsl_hex(h, base_s, value)
+        for key, value in steps.items()
+    }
+
+    theme["glow"] = hsl_hex(h, min(s, 0.55), 0.38)
+    theme["accent"] = hsl_hex(h, s, l)
+    theme["accent_hover"] = hsl_hex(h, s, l + 0.08)
+    theme["accent_press"] = hsl_hex(h, s, l - 0.08)
+
+    seen = set()
+
+    for key in list(theme):
+        value = theme[key]
+
+        while value in seen:
+            value = "#%s%s%02x" % (
+                value[1:3],
+                value[3:5],
+                (int(value[5:7], 16) + 1) % 256,
+            )
+
+        seen.add(value)
+        theme[key] = value
+
+    return theme
+
+
+def get_theme(name, accent):
+    if name == DEFAULT_THEME_NAME:
+        return dict(DEFAULT_THEME)
+
+    if name in THEME_PRESETS:
+        return build_theme(THEME_PRESETS[name])
+
+    return build_theme(accent)
+
+
+def theme_color_map(source, target):
+    mapping = {}
+
+    for key, old in source.items():
+        new = target.get(key)
+
+        if new and old.lower() != new.lower():
+            mapping[old.lower()] = new
+
+    return mapping
 
 ALLOW_SHELL_COMMANDS = True
 
@@ -779,6 +1541,8 @@ def load_settings():
         "always_on_top": True,
         "font_size": DEFAULT_FONT_SIZE,
         "mic_sensitivity": DEFAULT_MIC_SENSITIVITY,
+        "theme_name": DEFAULT_THEME_NAME,
+        "theme_accent": DEFAULT_THEME_ACCENT,
     }
 
     try:
@@ -831,6 +1595,18 @@ def load_settings():
 
                 if sensitivity in MIC_SENSITIVITY_LEVELS:
                     settings["mic_sensitivity"] = sensitivity
+
+                theme_name = data.get("theme_name")
+
+                if theme_name in THEME_PRESETS or theme_name == "Custom":
+                    settings["theme_name"] = theme_name
+
+                theme_accent = normalize_hex(
+                    data.get("theme_accent")
+                )
+
+                if theme_accent:
+                    settings["theme_accent"] = theme_accent
 
     except Exception:
         pass
@@ -4480,6 +5256,26 @@ def start_confetti_animation(
 
         with _confetti_lock:
             _confetti_last_time = 0.0
+
+def run_on_main(root, function):
+    box = {"value": None, "error": None}
+    finished = threading.Event()
+
+    def runner():
+        try:
+            box["value"] = function()
+        except Exception as exc:
+            box["error"] = exc
+        finally:
+            finished.set()
+
+    root.after(0, runner)
+    finished.wait(120)
+
+    if box["error"] is not None:
+        raise box["error"]
+
+    return box["value"]
         
 def execute_action(action, root, mic_callback, app=None):
     if not isinstance(action, dict):
@@ -4526,7 +5322,10 @@ def execute_action(action, root, mic_callback, app=None):
         "flip_the_coin",
     ):
         try:
-            return flip_coin_animation(root)
+            return run_on_main(
+                root,
+                lambda: flip_coin_animation(root),
+            ) or "The coin flip finished."
 
         except Exception as exc:
             return (
@@ -4543,7 +5342,10 @@ def execute_action(action, root, mic_callback, app=None):
         "throw_a_dice",
     ):
         try:
-            return roll_dice_animation(root)
+            return run_on_main(
+                root,
+                lambda: roll_dice_animation(root),
+            ) or "The dice roll finished."
 
         except Exception as exc:
             return (
@@ -4595,18 +5397,18 @@ def execute_action(action, root, mic_callback, app=None):
                     )
 
                     if process_handle:
-                        status = kernel32.GetExitCodeProcess(
+                        exit_code = ctypes.c_ulong()
+
+                        queried = kernel32.GetExitCodeProcess(
                             process_handle,
-                            ctypes.byref(
-                                ctypes.c_ulong()
-                            ),
+                            ctypes.byref(exit_code),
                         )
 
                         kernel32.CloseHandle(
                             process_handle
                         )
 
-                        if status:
+                        if queried and exit_code.value == 259:
                             return (
                                 "A Rickroll is already playing."
                             )
@@ -8119,9 +8921,9 @@ def execute_action(action, root, mic_callback, app=None):
                         "-ClassName "
                         "WmiMonitorBrightnessMethods; "
                         f"$methods | ForEach-Object "
-                        "{{ $_.WmiSetBrightness(1,"
+                        "{ $_.WmiSetBrightness(1,"
                         f"{display_percent}"
-                        ") }}"
+                        ") }"
                     ),
                 ],
                 capture_output=True,
@@ -8618,10 +9420,19 @@ def find_data_folder():
     return APP_DATA_DIR
 
 class ZanelApp:
+    toast_window = None
+    toast_token = 0
+    resizing = False
+    _bg_brush = None
+    _bg_brush_color = None
+    rename_window = None
+    last_rename_time = 0.0
+    toast_bar = None
+
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("")
-        self.root.geometry("450x420+40+80")
+        self.root.geometry(f"{DEFAULT_WINDOW_WIDTH}x{DEFAULT_WINDOW_HEIGHT}+40+80")
         self.root.configure(bg="#0b0e14")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -8629,9 +9440,9 @@ class ZanelApp:
 
         self.running = True
         self.mic_muted = False
-        self.ai_busy = False
+        self.busy_chats = set()
         self.last_message_time = 0.0
-        self.message_cooldown = 1.5
+        self.message_cooldown = SEND_COOLDOWN
         self.last_clear_time = 0.0
         self.clear_cooldown = 7.0
         self.tts_busy = False
@@ -8651,6 +9462,10 @@ class ZanelApp:
         self.always_on_top = settings["always_on_top"]
         self.font_size = settings["font_size"]
         self.mic_sensitivity = settings["mic_sensitivity"]
+        self.theme_name = settings["theme_name"]
+        self.theme_accent = settings["theme_accent"]
+        self.theme = dict(DEFAULT_THEME)
+        self.theme_editor = None
         self.settings_frame = None
         self.settings_mic_was_muted = False
         self.saved_mic_muted = settings["mic_muted"]
@@ -8688,10 +9503,61 @@ class ZanelApp:
         self.minimize_transition = False
         self.restore_transition = False
         self.api_key = self.load_api_key()
+        self.chat_store = ChatStore(APP_DATA_DIR)
+        self.window_state = load_window_state()
+        self.sidebar_open = self.window_state["sidebar_open"]
+        self.sidebar_job = None
+        self.sidebar_px = 0
+        self.toast_job = None
+        self.viewer_window = None
+        self.win_mode = "normal"
+        self.normal_rect = None
+        self.geometry_job = None
+        self.resize_data = None
+        self.resize_handles = {}
+        self.resize_specs = {}
+        self.sidebar_rows = {}
+        self.active_chat_id = None
+        self.chat_loading = False
+        self.load_token = 0
+        self.deferred_entries = []
+        self.history_entries = []
+        self.history_start = 0
+        self.loading_older = False
+        self.last_chat_create = 0.0
+        self.last_chat_switch = 0.0
+        self.last_chat_delete = 0.0
+        self.pending_paste = None
+        self.paste_truncated = False
+        self.name_lock = threading.Lock()
+        self.cleanup_lock = threading.Lock()
+        self.cleanup_running = False
+        self.shutdown_done = False
+        self._chat_images = []
+        self._emoji_images = []
+        self._emoji_cache = {}
+        self._emoji_failed = set()
+        self._emoji_network = True
 
         self.build_ui()
         self.apply_window_settings()
         self.apply_chat_font()
+        self.apply_theme(
+            get_theme(
+                self.theme_name,
+                self.theme_accent,
+            )
+        )
+
+        self.build_resize_handles()
+        self.apply_saved_window()
+        self.init_chats()
+        self.root.bind("<Configure>", self.on_root_configure, add="+")
+        self.root.bind("<Destroy>", self.on_root_destroy, add="+")
+        self.root.after(1500, self.keep_handles_on_top)
+
+        if self.api_key:
+            self.start_server_cleanup()
 
         if self.mic_muted:
             self.set_mic(True)
@@ -8845,6 +9711,63 @@ class ZanelApp:
                 )
             )
             return ""
+
+    def _get_server_error(self, response, label):
+        if response is None:
+            return f"{label} server did not respond."
+
+        status = response.status_code
+        detail = ""
+
+        try:
+            data = response.json()
+
+            if isinstance(data, dict):
+                detail = str(
+                    data.get("error")
+                    or data.get("message")
+                    or data.get("detail")
+                    or ""
+                ).strip()
+        except ValueError:
+            detail = ""
+
+        if status in (401, 403):
+            base = f"{label} request was rejected. Check your API key."
+        elif status == 429:
+            base = f"{label} server is rate limiting you. Wait a moment."
+        elif status >= 500:
+            base = f"{label} server error (HTTP {status})."
+        else:
+            base = f"{label} request failed (HTTP {status})."
+
+        if detail:
+            return f"{base} {detail[:200]}"
+
+        return base
+
+    def clear_chat(self):
+        now = time.time()
+        elapsed = now - self.last_clear_time
+
+        if elapsed < self.clear_cooldown:
+            self.flash_state(
+                f"Wait {math.ceil(self.clear_cooldown - elapsed)}s to clear"
+            )
+            return
+
+        if self.chat_loading:
+            self.flash_state("Chat is loading…")
+            return
+
+        self.last_clear_time = now
+        self.load_token += 1
+        self.deferred_entries = []
+        self.history_entries = []
+        self.history_start = 0
+        self.loading_older = False
+        self.reset_chat_view()
+        self.flash_state("Chat cleared")
 
     def stop_rickroll(self):
         with self.rickroll_lock:
@@ -9166,6 +10089,1425 @@ class ZanelApp:
                     pass
 
             return f"Could not play music: {exc}"
+
+    def on_paste(self, _event=None):
+        try:
+            data = self.root.clipboard_get()
+        except tk.TclError:
+            return "break"
+
+        if not isinstance(data, str) or not data:
+            return "break"
+
+        data = data.replace("\r\n", "\n").replace("\r", "\n")
+
+        if (
+            len(data) >= PASTE_THRESHOLD_CHARS
+            or data.count("\n") >= PASTE_THRESHOLD_LINES - 1
+        ):
+            self.set_pending_paste(data)
+            return "break"
+
+        try:
+            if self.manual.get() == INPUT_PLACEHOLDER:
+                self.manual.delete(0, tk.END)
+                self.manual.configure(fg="#E8F5ED")
+
+            if self.manual.selection_present():
+                self.manual.delete(tk.SEL_FIRST, tk.SEL_LAST)
+
+            self.manual.insert(tk.INSERT, data.replace("\n", " "))
+        except tk.TclError:
+            pass
+
+        return "break"
+
+    def set_pending_paste(self, data):
+        combined = f"{self.pending_paste}\n{data}" if self.pending_paste else data
+
+        self.paste_truncated = len(combined) > PASTE_MAX_CHARS
+        self.pending_paste = combined[:PASTE_MAX_CHARS]
+        self.update_paste_bar()
+
+    def clear_pending_paste(self):
+        self.pending_paste = None
+        self.paste_truncated = False
+        self.update_paste_bar()
+
+    def view_pending_paste(self):
+        if self.pending_paste:
+            self.open_paste_viewer(
+                self.pending_paste,
+                editable=True,
+                on_save=self.save_pending_paste,
+                title="Edit pasted message",
+            )
+
+    def save_pending_paste(self, value):
+        value = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+
+        if not value.strip():
+            self.clear_pending_paste()
+            return
+
+        self.paste_truncated = len(value) > PASTE_MAX_CHARS
+        self.pending_paste = value[:PASTE_MAX_CHARS]
+        self.update_paste_bar()
+
+    def update_paste_bar(self):
+        try:
+            if self.pending_paste is None:
+                self.paste_bar.pack_forget()
+                return
+
+            suffix = (
+                f"  ·  trimmed to {PASTE_MAX_CHARS:,}"
+                if self.paste_truncated
+                else ""
+            )
+
+            self.paste_label.configure(
+                text=(
+                    f"Pasted message  ·  {len(self.pending_paste):,} "
+                    f"characters{suffix}  ·  click to edit"
+                )
+            )
+
+            if not self.paste_bar.winfo_manager():
+                self.paste_bar.pack(
+                    side="bottom",
+                    fill="x",
+                    padx=12,
+                    pady=(0, 6),
+                    before=self.chat,
+                )
+        except tk.TclError:
+            pass
+
+    def _server_clear(self, item):
+        key = self.api_key
+
+        if not key:
+            return False
+
+        try:
+            response = requests.post(
+                MESSAGES_CLEAR_URL,
+                json={
+                    "key": key,
+                    "platform": item["platform"],
+                    "user_id": item["user_id"],
+                },
+                timeout=8,
+            )
+        except requests.RequestException:
+            return False
+
+        return response.status_code == 200
+
+    def start_server_cleanup(self):
+        with self.cleanup_lock:
+            if self.cleanup_running:
+                return
+
+            self.cleanup_running = True
+
+        threading.Thread(
+            target=self._server_cleanup_worker,
+            daemon=True,
+        ).start()
+
+    def _server_cleanup_worker(self):
+        try:
+            for _attempt in range(3):
+                items = self.chat_store.pending_items()
+
+                if not items:
+                    break
+
+                for item in items:
+                    if self._server_clear(item):
+                        self.chat_store.remove_pending(item)
+
+                    time.sleep(0.3)
+
+                if not self.chat_store.pending_items():
+                    break
+
+                time.sleep(12)
+        finally:
+            with self.cleanup_lock:
+                self.cleanup_running = False
+
+    def shutdown_cleanup(self):
+        if self.shutdown_done:
+            return
+
+        self.shutdown_done = True
+
+        try:
+            self.save_window_now()
+        except Exception:
+            pass
+
+        try:
+            self.chat_store.flush()
+        except Exception:
+            pass
+
+        pending = self.chat_store.pending_items()
+
+        if not pending or not self.api_key:
+            return
+
+        finished = threading.Event()
+
+        def run():
+            try:
+                for item in pending:
+                    if self._server_clear(item):
+                        self.chat_store.remove_pending(item)
+            finally:
+                finished.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        finished.wait(4)
+
+    def on_root_destroy(self, event):
+        if event.widget is not self.root:
+            return
+
+        self.running = False
+        self.shutdown_cleanup()
+
+    def open_paste_viewer(self, text, editable=False, on_save=None, title="Pasted message"):
+        if not isinstance(text, str):
+            return
+
+        if not editable and not text:
+            return
+
+        existing = self.viewer_window
+
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+
+            self.viewer_window = None
+
+        total = len(text)
+        left, top, screen_w, screen_h = self.virtual_screen()
+        width = max(360, min(640, screen_w - 40))
+        height = max(260, min(500, screen_h - 80))
+
+        viewer = tk.Toplevel(self.root)
+        self.viewer_window = viewer
+        viewer.overrideredirect(True)
+        viewer.attributes("-topmost", True)
+        viewer.configure(bg=self.theme["border"])
+
+        x = max(left, min(self.root.winfo_rootx() + 40, left + screen_w - width))
+        y = max(top, min(self.root.winfo_rooty() + 60, top + screen_h - height))
+        viewer.geometry(f"{width}x{height}+{x}+{y}")
+
+        def on_destroy(event):
+            if event.widget is viewer and self.viewer_window is viewer:
+                self.viewer_window = None
+
+        viewer.bind("<Destroy>", on_destroy)
+
+        shell = tk.Frame(viewer, bg=self.theme["bg"])
+        shell.pack(fill="both", expand=True, padx=1, pady=1)
+
+        titlebar = tk.Frame(shell, bg=self.theme["title"], height=38)
+        titlebar.pack(fill="x", side="top")
+        titlebar.pack_propagate(False)
+
+        drag = {"x": 0, "y": 0}
+
+        def start_drag(event):
+            drag["x"] = event.x_root - viewer.winfo_x()
+            drag["y"] = event.y_root - viewer.winfo_y()
+
+        def do_drag(event):
+            new_x = max(
+                left,
+                min(event.x_root - drag["x"], left + screen_w - viewer.winfo_width()),
+            )
+            new_y = max(
+                top,
+                min(event.y_root - drag["y"], top + screen_h - viewer.winfo_height()),
+            )
+            viewer.geometry(f"+{new_x}+{new_y}")
+
+        titlebar.bind("<ButtonPress-1>", start_drag)
+        titlebar.bind("<B1-Motion>", do_drag)
+
+        title_label = tk.Label(
+            titlebar,
+            text=title,
+            fg="#F2F6FF",
+            bg=self.theme["title"],
+            font=("Segoe UI", 10, "bold"),
+        )
+        title_label.pack(side="left", padx=(14, 0))
+        title_label.bind("<ButtonPress-1>", start_drag)
+        title_label.bind("<B1-Motion>", do_drag)
+
+        tk.Button(
+            titlebar,
+            text="×",
+            command=lambda: close_viewer(),
+            fg="#b9c2d0",
+            bg=self.theme["title"],
+            activeforeground="white",
+            activebackground="#c43f52",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=12,
+            cursor="hand2",
+            font=("Segoe UI Symbol", 13),
+        ).pack(side="right", fill="y")
+
+        copy_button = tk.Button(
+            titlebar,
+            text="Copy all",
+            fg="#DDF8E8" if editable else "#071019",
+            bg=self.theme["button"] if editable else self.theme["accent"],
+            activeforeground="white" if editable else "#071019",
+            activebackground=(
+                self.theme["button_hover"]
+                if editable
+                else self.theme["accent_hover"]
+            ),
+            borderwidth=0,
+            relief="flat",
+            padx=10,
+            pady=2,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        )
+        copy_button.pack(side="right", padx=(0, 6), pady=6)
+
+        save_button = None
+
+        if editable:
+            save_button = tk.Button(
+                titlebar,
+                text="Save",
+                fg="#071019",
+                bg=self.theme["accent"],
+                activeforeground="#071019",
+                activebackground=self.theme["accent_hover"],
+                borderwidth=0,
+                relief="flat",
+                padx=12,
+                pady=2,
+                cursor="hand2",
+                font=("Segoe UI", 9, "bold"),
+            )
+            save_button.pack(side="right", padx=(0, 6), pady=6)
+
+        footer = tk.Frame(shell, bg=self.theme["bg"])
+        footer.pack(side="bottom", fill="x")
+
+        status = tk.Label(
+            footer,
+            text="",
+            fg="#8290A8",
+            bg=self.theme["bg"],
+            font=("Segoe UI", 8),
+        )
+        status.pack(side="left", padx=12, pady=5)
+
+        grip = tk.Label(
+            footer,
+            text="◢",
+            fg="#56677A",
+            bg=self.theme["bg"],
+            cursor="size_nw_se",
+            font=("Segoe UI Symbol", 9),
+        )
+        grip.pack(side="right", padx=4)
+
+        grip_data = {"x": 0, "y": 0, "w": width, "h": height}
+
+        def grip_press(event):
+            grip_data["x"] = event.x_root
+            grip_data["y"] = event.y_root
+            grip_data["w"] = viewer.winfo_width()
+            grip_data["h"] = viewer.winfo_height()
+
+        def grip_drag(event):
+            new_w = max(
+                360,
+                min(
+                    grip_data["w"] + event.x_root - grip_data["x"],
+                    left + screen_w - viewer.winfo_x(),
+                ),
+            )
+            new_h = max(
+                240,
+                min(
+                    grip_data["h"] + event.y_root - grip_data["y"],
+                    top + screen_h - viewer.winfo_y(),
+                ),
+            )
+            viewer.geometry(f"{new_w}x{new_h}")
+
+        grip.bind("<ButtonPress-1>", grip_press)
+        grip.bind("<B1-Motion>", grip_drag)
+
+        body = tk.Frame(shell, bg=self.theme["panel"])
+        body.pack(fill="both", expand=True, padx=8, pady=8)
+
+        scrollbar = tk.Scrollbar(body, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+
+        text_widget = tk.Text(
+            body,
+            wrap="word",
+            undo=editable,
+            maxundo=200 if editable else 0,
+            bg=self.theme["panel"],
+            fg="#E8F5ED",
+            insertbackground="white",
+            selectbackground="#2d405c",
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=10,
+            font=("Segoe UI", self.font_size),
+        )
+        text_widget.pack(side="left", fill="both", expand=True)
+
+        loaded = {"count": 0, "busy": False}
+
+        def current_text():
+            return text_widget.get("1.0", "end-1c")
+
+        def update_status(_event=None):
+            try:
+                if editable:
+                    count = len(current_text())
+                    status.configure(
+                        text=(
+                            f"{count:,} / {PASTE_MAX_CHARS:,} characters"
+                            "  ·  Ctrl+S to save"
+                        ),
+                        fg="#FF6B7A" if count > PASTE_MAX_CHARS else "#8290A8",
+                    )
+                else:
+                    suffix = (
+                        "  ·  scroll down to load more"
+                        if loaded["count"] < total
+                        else ""
+                    )
+                    status.configure(
+                        text=(
+                            f"Showing {loaded['count']:,} of "
+                            f"{total:,} characters{suffix}"
+                        ),
+                        fg="#8290A8",
+                    )
+            except tk.TclError:
+                pass
+
+        def load_chunk():
+            if loaded["busy"] or loaded["count"] >= total:
+                return
+
+            loaded["busy"] = True
+
+            try:
+                start = loaded["count"]
+                end = total if editable else min(total, start + VIEWER_CHUNK_CHARS)
+
+                if end < total:
+                    cut = text.rfind("\n", start, end)
+
+                    if cut <= start + VIEWER_CHUNK_CHARS // 2:
+                        cut = text.rfind(" ", start, end)
+
+                    if cut > start + VIEWER_CHUNK_CHARS // 2:
+                        end = cut + 1
+
+                text_widget.insert("end", text[start:end])
+                loaded["count"] = end
+                update_status()
+            except tk.TclError:
+                pass
+            finally:
+                loaded["busy"] = False
+
+        def on_scroll(first, last):
+            try:
+                scrollbar.set(first, last)
+
+                if loaded["count"] < total and float(last) >= 0.97:
+                    viewer.after_idle(load_chunk)
+            except (tk.TclError, ValueError):
+                pass
+
+        scrollbar.configure(command=text_widget.yview)
+        text_widget.configure(yscrollcommand=on_scroll)
+
+        def close_viewer(_event=None):
+            try:
+                if editable and current_text() != text:
+                    if not messagebox.askyesno(
+                        "Discard changes",
+                        "Close without saving your changes?",
+                        parent=viewer,
+                    ):
+                        return "break"
+
+                viewer.destroy()
+            except tk.TclError:
+                pass
+
+            return "break"
+
+        def save_and_close(_event=None):
+            if not editable or on_save is None:
+                return "break"
+
+            try:
+                on_save(current_text())
+            except Exception:
+                pass
+
+            try:
+                viewer.destroy()
+            except tk.TclError:
+                pass
+
+            return "break"
+
+        def copy_all():
+            try:
+                value = current_text() if editable else text
+                self.root.clipboard_clear()
+                self.root.clipboard_append(value)
+                copy_button.configure(text="Copied")
+                viewer.after(
+                    1500,
+                    lambda: copy_button.configure(text="Copy all"),
+                )
+            except tk.TclError:
+                pass
+
+        copy_button.configure(command=copy_all)
+
+        if save_button is not None:
+            save_button.configure(command=save_and_close)
+
+        def select_all(_event=None):
+            text_widget.tag_add("sel", "1.0", "end-1c")
+            return "break"
+
+        if editable:
+            text_widget.bind("<KeyRelease>", update_status)
+            text_widget.bind("<ButtonRelease-1>", update_status)
+            text_widget.bind("<Control-s>", save_and_close)
+            text_widget.bind("<Control-a>", select_all)
+        else:
+            def block_edit(event):
+                if event.keysym in (
+                    "Left", "Right", "Up", "Down",
+                    "Prior", "Next", "Home", "End",
+                ):
+                    return None
+
+                if event.state & 0x4 and event.keysym.lower() in ("c", "a"):
+                    return None
+
+                return "break"
+
+            text_widget.bind("<Key>", block_edit)
+            text_widget.bind("<Control-a>", select_all)
+            text_widget.bind("<<Paste>>", lambda _event: "break")
+            text_widget.bind("<<Cut>>", lambda _event: "break")
+            text_widget.bind("<Button-2>", lambda _event: "break")
+
+        text_widget.bind("<Escape>", close_viewer)
+        text_widget.bind("<Button-1>", lambda _event: viewer.focus_force(), add="+")
+
+        load_chunk()
+        update_status()
+
+        def focus_text():
+            try:
+                viewer.focus_force()
+                text_widget.focus_set()
+            except tk.TclError:
+                pass
+
+        viewer.after(60, focus_text)
+
+    def flash_state(self, text, seconds=2.5):
+        self.show_toast(text, seconds)
+
+    @staticmethod
+    def toast_round(canvas, x1, y1, x2, y2, radius, **options):
+        points = [
+            x1 + radius, y1,
+            x2 - radius, y1,
+            x2, y1,
+            x2, y1 + radius,
+            x2, y2 - radius,
+            x2, y2,
+            x2 - radius, y2,
+            x1 + radius, y2,
+            x1, y2,
+            x1, y2 - radius,
+            x1, y1 + radius,
+            x1, y1,
+        ]
+
+        return canvas.create_polygon(points, smooth=True, **options)
+
+    def show_toast(self, text, seconds=2.4):
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.root.after(0, lambda: self.show_toast(text, seconds))
+            except (tk.TclError, RuntimeError):
+                pass
+            return
+
+        text = str(text or "").strip()
+
+        if not text or not self.running:
+            return
+
+        try:
+            if self.root.state() in ("withdrawn", "iconic"):
+                return
+        except tk.TclError:
+            return
+
+        self.hide_toast()
+        self.toast_token += 1
+        token = self.toast_token
+
+        try:
+            theme = self.theme
+            transparent = "#010101"
+            lowered = text.lower()
+
+            if any(
+                word in lowered
+                for word in ("wait", "max", "cooldown", "loading", "already", "empty")
+            ):
+                symbol = "!"
+            elif any(
+                word in lowered
+                for word in ("cleared", "reset", "saved", "renamed", "removed")
+            ):
+                symbol = "✓"
+            else:
+                symbol = "i"
+
+            toast = tk.Toplevel(self.root)
+            toast.zanel_skip = True
+            toast.withdraw()
+            toast.overrideredirect(True)
+            toast.configure(bg=transparent)
+
+            try:
+                toast.attributes("-topmost", True)
+                toast.attributes("-transparentcolor", transparent)
+                toast.attributes("-alpha", 0.0)
+            except tk.TclError:
+                pass
+
+            canvas = tk.Canvas(
+                toast,
+                width=360,
+                height=200,
+                bg=transparent,
+                bd=0,
+                highlightthickness=0,
+            )
+            canvas.pack()
+
+            probe = canvas.create_text(
+                0,
+                0,
+                text=text,
+                anchor="nw",
+                width=250,
+                font=("Segoe UI", 9, "bold"),
+            )
+            bounds = canvas.bbox(probe)
+            text_w = bounds[2] - bounds[0]
+            text_h = bounds[3] - bounds[1]
+            canvas.delete(probe)
+
+            width = max(190, text_w + 84)
+            height = text_h + 52
+            bar_y = height - 12
+            center_y = height // 2 - 3
+
+            canvas.configure(width=width, height=height)
+
+            self.toast_round(
+                canvas,
+                0,
+                0,
+                width - 1,
+                height - 1,
+                14,
+                fill=theme["border"],
+                outline="",
+            )
+
+            self.toast_round(
+                canvas,
+                1,
+                1,
+                width - 2,
+                height - 2,
+                13,
+                fill=theme["panel"],
+                outline="",
+            )
+
+            canvas.create_oval(
+                17,
+                center_y - 13,
+                43,
+                center_y + 13,
+                fill=theme["button"],
+                outline=theme["accent"],
+                width=2,
+            )
+
+            canvas.create_text(
+                30,
+                center_y,
+                text=symbol,
+                fill=theme["accent"],
+                font=("Segoe UI Symbol", 11, "bold"),
+            )
+
+            canvas.create_text(
+                56,
+                13,
+                text="ZANEL",
+                anchor="nw",
+                fill=theme["accent"],
+                font=("Segoe UI", 7, "bold"),
+            )
+
+            canvas.create_text(
+                56,
+                27,
+                text=text,
+                anchor="nw",
+                width=250,
+                fill="#E8F5ED",
+                font=("Segoe UI", 9, "bold"),
+            )
+
+            bar_start = 56
+            bar_end = width - 16
+
+            canvas.create_line(
+                bar_start,
+                bar_y,
+                bar_end,
+                bar_y,
+                fill=theme["track"],
+                width=3,
+                capstyle=tk.ROUND,
+            )
+
+            bar_item = canvas.create_line(
+                bar_start,
+                bar_y,
+                bar_end,
+                bar_y,
+                fill=theme["accent"],
+                width=3,
+                capstyle=tk.ROUND,
+            )
+
+            canvas.configure(cursor="hand2")
+            canvas.bind("<Button-1>", lambda _event: self.hide_toast())
+
+            self.toast_bar = (canvas, bar_item, bar_start, bar_end, bar_y)
+            self.toast_window = toast
+            toast.update_idletasks()
+            self.position_toast(0)
+            toast.deiconify()
+
+            self.toast_tick(token, time.monotonic(), max(0.4, float(seconds)))
+        except tk.TclError:
+            self.hide_toast()
+
+    def position_toast(self, offset=0):
+        toast = self.toast_window
+
+        if toast is None:
+            return
+
+        width = toast.winfo_reqwidth()
+        height = toast.winfo_reqheight()
+
+        left, top, screen_w, screen_h = self.virtual_screen()
+
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - width) // 2
+        y = (
+            self.root.winfo_rooty()
+            + self.root.winfo_height()
+            - height
+            - 96
+            + offset
+        )
+
+        x = max(left + 4, min(x, left + screen_w - width - 4))
+        y = max(top + 4, min(y, top + screen_h - height - 4))
+
+        toast.geometry(f"{width}x{height}+{x}+{y}")
+
+    def toast_tick(self, token, started, hold):
+        if token != self.toast_token or self.toast_window is None:
+            return
+
+        fade_in = 0.18
+        fade_out = 0.28
+        elapsed = time.monotonic() - started
+
+        try:
+            if elapsed < fade_in:
+                progress = 1 - (1 - elapsed / fade_in) ** 3
+                alpha = 0.98 * progress
+                offset = int((1 - progress) * 14)
+                fraction = 1.0
+            elif elapsed < fade_in + hold:
+                alpha = 0.98
+                offset = 0
+                fraction = 1.0 - (elapsed - fade_in) / hold
+            elif elapsed < fade_in + hold + fade_out:
+                progress = (elapsed - fade_in - hold) / fade_out
+                alpha = 0.98 * (1 - progress)
+                offset = int(progress * 8)
+                fraction = 0.0
+            else:
+                self.hide_toast()
+                return
+
+            bar = self.toast_bar
+
+            if bar is not None:
+                canvas, item, x1, x2, y = bar
+
+                canvas.coords(
+                    item,
+                    x1,
+                    y,
+                    x1 + (x2 - x1) * max(0.0, fraction),
+                    y,
+                )
+
+                canvas.itemconfigure(
+                    item,
+                    state="normal" if fraction > 0.02 else "hidden",
+                )
+
+            self.toast_window.attributes("-alpha", max(0.0, alpha))
+            self.position_toast(offset)
+
+            self.toast_job = self.root.after(
+                16,
+                lambda: self.toast_tick(token, started, hold),
+            )
+        except tk.TclError:
+            self.hide_toast()
+
+    def hide_toast(self):
+        self.toast_token += 1
+
+        if self.toast_job is not None:
+            try:
+                self.root.after_cancel(self.toast_job)
+            except tk.TclError:
+                pass
+
+            self.toast_job = None
+
+        toast = self.toast_window
+        self.toast_window = None
+
+        if toast is not None:
+            try:
+                toast.destroy()
+            except tk.TclError:
+                pass
+
+    def set_chat_visible(self, visible):
+        try:
+            if visible:
+                if not self.chat.winfo_manager():
+                    self.chat.pack(
+                        side="top",
+                        fill="both",
+                        expand=True,
+                        padx=12,
+                        pady=(12, 10),
+                    )
+            else:
+                if self.chat.winfo_manager():
+                    self.chat.pack_forget()
+        except tk.TclError:
+            pass
+
+    def show_loading_label(self, visible):
+        label = getattr(self, "loading_label", None)
+
+        if label is None:
+            return
+
+        try:
+            if visible:
+                label.place(relx=0.5, rely=0.42, anchor="center")
+                label.lift()
+            else:
+                label.place_forget()
+        except tk.TclError:
+            pass
+
+    def min_size(self):
+        width = MIN_WINDOW_WIDTH + RAIL_WIDTH
+
+        if self.sidebar_open:
+            width += SIDEBAR_WIDTH
+
+        return width, MIN_WINDOW_HEIGHT
+
+    def virtual_screen(self):
+        try:
+            user32 = ctypes.windll.user32
+            left = int(user32.GetSystemMetrics(76))
+            top = int(user32.GetSystemMetrics(77))
+            width = int(user32.GetSystemMetrics(78))
+            height = int(user32.GetSystemMetrics(79))
+
+            if width > 0 and height > 0:
+                return left, top, width, height
+        except Exception:
+            pass
+
+        return (
+            0,
+            0,
+            self.root.winfo_screenwidth(),
+            self.root.winfo_screenheight(),
+        )
+
+    def get_monitor_rects(self):
+        try:
+            user32 = ctypes.windll.user32
+
+            user32.MonitorFromWindow.restype = ctypes.wintypes.HANDLE
+            user32.MonitorFromWindow.argtypes = [
+                ctypes.wintypes.HWND,
+                ctypes.wintypes.DWORD,
+            ]
+            user32.GetMonitorInfoW.restype = ctypes.wintypes.BOOL
+            user32.GetMonitorInfoW.argtypes = [
+                ctypes.wintypes.HANDLE,
+                ctypes.POINTER(MONITORINFO),
+            ]
+            user32.GetParent.restype = ctypes.wintypes.HWND
+            user32.GetParent.argtypes = [ctypes.wintypes.HWND]
+
+            hwnd = user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            monitor = user32.MonitorFromWindow(hwnd, 2)
+
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+
+            if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                work = (
+                    info.rcWork.left,
+                    info.rcWork.top,
+                    info.rcWork.right,
+                    info.rcWork.bottom,
+                )
+                full = (
+                    info.rcMonitor.left,
+                    info.rcMonitor.top,
+                    info.rcMonitor.right,
+                    info.rcMonitor.bottom,
+                )
+                return work, full
+        except Exception:
+            pass
+
+        width = self.root.winfo_screenwidth()
+        height = self.root.winfo_screenheight()
+
+        return (0, 0, width, height), (0, 0, width, height)
+
+    def fit_rect(self, width, height, x, y, min_w=None, min_h=None):
+        left, top, screen_w, screen_h = self.virtual_screen()
+        base_w, base_h = self.min_size()
+
+        min_w = base_w if min_w is None else min_w
+        min_h = base_h if min_h is None else min_h
+        min_w = min(int(min_w), screen_w)
+        min_h = min(int(min_h), screen_h)
+
+        width = max(min_w, min(int(width), screen_w))
+        height = max(min_h, min(int(height), screen_h))
+        x = max(left, min(int(x), left + screen_w - width))
+        y = max(top, min(int(y), top + screen_h - height))
+
+        return width, height, x, y
+
+    def apply_geometry(self, width, height, x, y):
+        width, height, x, y = self.fit_rect(width, height, x, y)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+        return width, height, x, y
+
+    def current_rect(self):
+        return (
+            self.root.winfo_x(),
+            self.root.winfo_y(),
+            self.root.winfo_width(),
+            self.root.winfo_height(),
+        )
+
+    def apply_saved_window(self):
+        state = self.window_state
+        x = state["x"]
+        y = state["y"]
+
+        if x is None or y is None:
+            x, y = 40, 80
+
+        self.set_sidebar(self.sidebar_open, adjust=False)
+
+        width, height, x, y = self.apply_geometry(
+            state["width"],
+            state["height"],
+            x,
+            y,
+        )
+
+        self.normal_rect = (x, y, width, height)
+        self.update_window_controls()
+
+    def schedule_window_save(self):
+        if self.geometry_job is not None:
+            try:
+                self.root.after_cancel(self.geometry_job)
+            except tk.TclError:
+                pass
+
+        try:
+            self.geometry_job = self.root.after(500, self.save_window_now)
+        except tk.TclError:
+            self.geometry_job = None
+
+    def save_window_now(self):
+        self.geometry_job = None
+        rect = self.normal_rect
+
+        if rect is None:
+            return
+
+        save_window_state(
+            {
+                "width": rect[2],
+                "height": rect[3],
+                "x": rect[0],
+                "y": rect[1],
+                "maximized": False,
+                "sidebar_open": self.sidebar_open,
+            }
+        )
+
+    def on_root_configure(self, event):
+        if self.resizing:
+            return
+        if event.widget is not self.root or self.win_mode != "normal":
+            return
+
+        try:
+            if self.root.state() != "normal":
+                return
+
+            rect = self.current_rect()
+        except tk.TclError:
+            return
+
+        if rect[2] <= 1 or rect[3] <= 1:
+            return
+
+        self.normal_rect = rect
+        self.schedule_window_save()
+
+    def update_window_controls(self):
+        try:
+            for edge, handle in self.resize_handles.items():
+                handle.place(**self.resize_specs[edge])
+                handle.lift()
+        except tk.TclError:
+            pass
+
+    def reset_window_size(self):
+        try:
+            self.win_mode = "normal"
+            self.root.attributes("-topmost", bool(self.always_on_top))
+
+            width = DEFAULT_WINDOW_WIDTH + (
+                SIDEBAR_WIDTH if self.sidebar_open else 0
+            )
+
+            x = self.root.winfo_x()
+            y = self.root.winfo_y()
+
+            width, height, x, y = self.apply_geometry(
+                width,
+                DEFAULT_WINDOW_HEIGHT,
+                x,
+                y,
+            )
+
+            self.normal_rect = (x, y, width, height)
+            self.update_window_controls()
+            self.schedule_window_save()
+            self.flash_state("Window size reset")
+        except tk.TclError:
+            pass
+
+    def build_resize_handles(self):
+        specs = {
+            "n": ("size_ns", dict(x=14, y=0, relwidth=1.0, width=-28, height=5)),
+            "s": ("size_ns", dict(x=14, rely=1.0, y=-5, relwidth=1.0, width=-28, height=5)),
+            "w": ("size_we", dict(x=0, y=44, relheight=1.0, height=-56, width=5)),
+            "e": ("size_we", dict(relx=1.0, x=-5, y=44, relheight=1.0, height=-56, width=5)),
+            "nw": ("size_nw_se", dict(x=0, y=0, width=12, height=12)),
+            "sw": ("size_ne_sw", dict(x=0, rely=1.0, y=-12, width=12, height=12)),
+            "se": ("size_nw_se", dict(relx=1.0, x=-12, rely=1.0, y=-12, width=12, height=12)),
+        }
+
+        for edge, (cursor, placement) in specs.items():
+            handle = tk.Frame(
+                self.root,
+                bg="#0B0E14",
+                cursor=cursor,
+            )
+
+            handle.bind(
+                "<ButtonPress-1>",
+                lambda event, e=edge: self.start_resize(e, event),
+            )
+            handle.bind(
+                "<B1-Motion>",
+                lambda event, e=edge: self.do_resize(e, event),
+            )
+            handle.bind(
+                "<ButtonRelease-1>",
+                lambda event: self.end_resize(),
+            )
+
+            self.resize_handles[edge] = handle
+            self.resize_specs[edge] = placement
+
+        self.update_window_controls()
+
+    def keep_handles_on_top(self):
+        if not self.running:
+            return
+
+        try:
+            for handle in self.resize_handles.values():
+                handle.lift()
+
+            self.root.after(1500, self.keep_handles_on_top)
+        except tk.TclError:
+            pass
+
+    def start_resize(self, edge, event):
+        if self.win_mode != "normal":
+            return
+
+        self.resizing = True
+
+        self.resize_data = {
+            "edge": edge,
+            "x": event.x_root,
+            "y": event.y_root,
+            "left": self.root.winfo_x(),
+            "top": self.root.winfo_y(),
+            "width": self.root.winfo_width(),
+            "height": self.root.winfo_height(),
+            "target": None,
+            "applied": None,
+            "job": None,
+        }
+
+    def do_resize(self, edge, event):
+        data = self.resize_data
+
+        if not data or self.win_mode != "normal":
+            return
+
+        dx = event.x_root - data["x"]
+        dy = event.y_root - data["y"]
+        min_w, min_h = self.min_size()
+        view_left, view_top, view_w, view_h = self.virtual_screen()
+
+        left = data["left"]
+        top = data["top"]
+        width = data["width"]
+        height = data["height"]
+        right = left + width
+        bottom = top + height
+
+        if "e" in edge:
+            width = max(min_w, min(data["width"] + dx, view_left + view_w - left))
+
+        if "s" in edge:
+            height = max(min_h, min(data["height"] + dy, view_top + view_h - top))
+
+        if "w" in edge:
+            width = max(min_w, min(data["width"] - dx, right - view_left))
+            left = right - width
+
+        if "n" in edge:
+            height = max(min_h, min(data["height"] - dy, bottom - view_top))
+            top = bottom - height
+
+        data["target"] = (width, height, left, top)
+
+        if data["job"] is None:
+            try:
+                data["job"] = self.root.after(16, self.apply_resize)
+            except tk.TclError:
+                data["job"] = None
+
+    def apply_resize(self):
+        data = self.resize_data
+
+        if not data:
+            return
+
+        data["job"] = None
+        target = data.get("target")
+
+        if not target or target == data.get("applied"):
+            return
+
+        try:
+            self.root.geometry(
+                f"{target[0]}x{target[1]}+{target[2]}+{target[3]}"
+            )
+            self.root.update_idletasks()
+            data["applied"] = target
+        except tk.TclError:
+            pass
+
+    def end_resize(self):
+        data = self.resize_data
+
+        if data and data.get("job") is not None:
+            try:
+                self.root.after_cancel(data["job"])
+            except tk.TclError:
+                pass
+
+            data["job"] = None
+
+        self.apply_resize()
+        self.resize_data = None
+        self.resizing = False
+
+        try:
+            rect = self.current_rect()
+
+            if rect[2] > 1 and rect[3] > 1:
+                self.normal_rect = rect
+        except tk.TclError:
+            pass
+
+        self.schedule_window_save()
+
+    def start_drag(self, event):
+        if self.win_mode != "normal":
+            return
+
+        self.drag_x = event.x_root - self.root.winfo_x()
+        self.drag_y = event.y_root - self.root.winfo_y()
+
+    def drag_window(self, event):
+        if not self.running or self.win_mode != "normal":
+            return
+
+        try:
+            width = self.root.winfo_width()
+            height = self.root.winfo_height()
+
+            _, _, x, y = self.fit_rect(
+                width,
+                height,
+                event.x_root - self.drag_x,
+                event.y_root - self.drag_y,
+                1,
+                1,
+            )
+
+            self.root.geometry(f"+{x}+{y}")
+        except tk.TclError:
+            pass
+
+    def on_escape(self, _event=None):
+        if self.theme_editor is not None or self.settings_frame is not None:
+            self.close_settings()
+
+    def toggle_sidebar(self):
+        self.set_sidebar(not self.sidebar_open)
+
+    def set_sidebar(self, open_, adjust=True):
+        open_ = bool(open_)
+        changed = open_ != self.sidebar_open
+        self.sidebar_open = open_
+
+        try:
+            self.sidebar_toggle.configure(text="‹" if open_ else "›")
+        except tk.TclError:
+            return
+
+        if self.sidebar_job is not None:
+            try:
+                self.root.after_cancel(self.sidebar_job)
+            except tk.TclError:
+                pass
+
+            self.sidebar_job = None
+
+        if not adjust or not changed or self.win_mode != "normal":
+            self.finish_sidebar(open_)
+
+            if changed:
+                self.schedule_window_save()
+
+            return
+
+        self.animate_sidebar(open_)
+
+    def finish_sidebar(self, open_):
+        self.sidebar_px = SIDEBAR_WIDTH if open_ else 0
+
+        try:
+            if open_:
+                self.sidebar.configure(width=SIDEBAR_WIDTH)
+
+                if not self.sidebar.winfo_manager():
+                    self.sidebar.pack(side="left", fill="y", after=self.rail)
+            else:
+                self.sidebar.pack_forget()
+        except tk.TclError:
+            pass
+
+    def animate_sidebar(self, open_):
+        start_px = self.sidebar_px
+        end_px = SIDEBAR_WIDTH if open_ else 0
+
+        if start_px == end_px:
+            self.finish_sidebar(open_)
+            return
+
+        try:
+            self.root.update_idletasks()
+            base_width = self.root.winfo_width() - start_px
+            height = self.root.winfo_height()
+            x = self.root.winfo_x()
+            y = self.root.winfo_y()
+
+            if not self.sidebar.winfo_manager():
+                self.sidebar.configure(width=max(1, start_px))
+                self.sidebar.pack(side="left", fill="y", after=self.rail)
+        except tk.TclError:
+            self.finish_sidebar(open_)
+            return
+
+        started = time.monotonic()
+        duration = 0.22
+        min_w = MIN_WINDOW_WIDTH + RAIL_WIDTH
+
+        def step():
+            self.sidebar_job = None
+
+            if not self.running:
+                return
+
+            progress = min(1.0, (time.monotonic() - started) / duration)
+            eased = 1 - (1 - progress) ** 3
+            px = int(round(start_px + (end_px - start_px) * eased))
+
+            try:
+                width, new_height, new_x, new_y = self.fit_rect(
+                    base_width + px,
+                    height,
+                    x,
+                    y,
+                    min_w,
+                    MIN_WINDOW_HEIGHT,
+                )
+
+                self.root.geometry(f"{width}x{new_height}+{new_x}+{new_y}")
+                self.sidebar_px = px
+
+                if px > 0:
+                    self.sidebar.configure(width=px)
+            except tk.TclError:
+                return
+
+            if progress >= 1.0:
+                self.finish_sidebar(open_)
+                self.schedule_window_save()
+                return
+
+            try:
+                self.sidebar_job = self.root.after(12, step)
+            except tk.TclError:
+                self.sidebar_job = None
+
+        step()
+
+    def on_global_wheel(self, event):
+        try:
+            if not self.sidebar_open:
+                return
+
+            target = self.root.winfo_containing(event.x_root, event.y_root)
+
+            if target is None:
+                return
+
+            canvas_path = str(self.chat_canvas)
+            path = str(target)
+
+            if path != canvas_path and not path.startswith(canvas_path + "."):
+                return
+
+            if self.chat_list.winfo_reqheight() <= self.chat_canvas.winfo_height():
+                return
+
+            self.chat_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        except (tk.TclError, KeyError):
+            pass
 
     def parse_version(self, version):
         version = str(version or "").strip().lower()
@@ -9796,6 +12138,8 @@ class ZanelApp:
                 "always_on_top": self.always_on_top,
                 "font_size": self.font_size,
                 "mic_sensitivity": self.mic_sensitivity,
+                "theme_name": self.theme_name,
+                "theme_accent": self.theme_accent,
             }
         )
 
@@ -9876,13 +12220,6 @@ class ZanelApp:
                 ).strip()
 
                 if value:
-                    self.messages.put(
-                        (
-                            "text",
-                            "System",
-                            f"API key loaded from {candidate}",
-                        )
-                    )
                     return value
 
             except (OSError, UnicodeError, ValueError):
@@ -10368,6 +12705,8 @@ class ZanelApp:
 
         entry.focus_set()
 
+        self.recolor_tree(window, DEFAULT_THEME, self.theme)
+
     def close_settings(self, force=False):
         if self.settings_frame is None:
             return
@@ -10377,6 +12716,16 @@ class ZanelApp:
             and time.time() - self.last_settings_toggle < 0.8
         ):
             return
+
+        if self.theme_editor is not None:
+            self.theme_editor = None
+
+            self.apply_theme(
+                get_theme(
+                    self.theme_name,
+                    self.theme_accent,
+                )
+            )
 
         frame = self.settings_frame
         self.settings_frame = None
@@ -10459,7 +12808,7 @@ class ZanelApp:
             pady=6,
             cursor="hand2",
             font=("Segoe UI Symbol", 9, "bold"),
-        ).pack(side="left")
+        ).pack(side="left", padx=(10, 0))
 
         tk.Label(
             header,
@@ -10793,12 +13142,12 @@ class ZanelApp:
         adv_row.pack(anchor="w", fill="x")
 
         adv_status = tk.Label(
-            adv_row,
+            adv_body,
             text="",
             fg="#8290A8",
             bg="#0B0E14",
             font=("Segoe UI", 9),
-            wraplength=240,
+            wraplength=380,
             justify="left",
         )
 
@@ -10853,7 +13202,39 @@ class ZanelApp:
             font=("Segoe UI", 9, "bold"),
         ).pack(side="left")
 
-        adv_status.pack(side="left", padx=(10, 0))
+        tk.Button(
+            adv_row,
+            text="Theme",
+            command=self.open_theme_editor,
+            fg="#071019",
+            bg="#5CFF9D",
+            activeforeground="#071019",
+            activebackground="#72FFAB",
+            borderwidth=0,
+            relief="flat",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(6, 0))
+
+        tk.Button(
+            adv_row,
+            text="Reset size",
+            command=self.reset_window_size,
+            fg="#DDF8E8",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#22312A",
+            borderwidth=0,
+            relief="flat",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(6, 0))
+
+        adv_status.pack(anchor="w", pady=(6, 0))
 
         def preview_opacity(*_args):
             try:
@@ -10924,16 +13305,16 @@ class ZanelApp:
 
         def style_tabs():
             active = {
-                "bg": "#5CFF9D",
+                "bg": self.theme["accent"],
                 "fg": "#071019",
-                "activebackground": "#72FFAB",
+                "activebackground": self.theme["accent_hover"],
                 "activeforeground": "#071019",
             }
 
             inactive = {
-                "bg": "#1A2520",
+                "bg": self.theme["button"],
                 "fg": "#DDF8E8",
-                "activebackground": "#22312A",
+                "activebackground": self.theme["button_hover"],
                 "activeforeground": "white",
             }
 
@@ -11121,6 +13502,26 @@ class ZanelApp:
             font=("Segoe UI", 9, "bold"),
         )
 
+        official_website_button = tk.Button(
+            button_row,
+            text="Official Website",
+            command=self.open_official_website,
+            fg="#DDF8E8",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#22312A",
+            borderwidth=0,
+            relief="flat",
+            padx=14,
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        )
+        official_website_button.pack(
+            side="left",
+            padx=(8, 0),
+        )
+
         version_label = tk.Label(
             body,
             text="",
@@ -11130,6 +13531,7 @@ class ZanelApp:
             anchor="w",
             justify="left",
         )
+        version_label.zanel_keep_fg = True
         version_label.pack(anchor="w", pady=(6, 0))
 
         status.pack(anchor="w", pady=(2, 0))
@@ -11269,6 +13671,10 @@ class ZanelApp:
                 if should_show_update:
                     if not update_visible["value"]:
                         update_button.pack(
+                            side="left",
+                            padx=(8, 0),
+                        )
+                        official_website_button.pack(
                             side="left",
                             padx=(8, 0),
                         )
@@ -11416,6 +13822,29 @@ class ZanelApp:
                 or sens_var.get() != saved_state["sens"]
             )
 
+        def reset_general_defaults():
+            voice_var.set(DEFAULT_TTS_VOICE)
+            speak_var.set(True)
+            mic_var.set(True)
+            update_voice_arrow()
+            show_status("Defaults restored. Press Save.")
+
+        tk.Button(
+            buttons,
+            text="Restore defaults",
+            command=reset_general_defaults,
+            fg="#DDF8E8",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#22312A",
+            borderwidth=0,
+            relief="flat",
+            padx=12,
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(10, 0))
+
         save_button = tk.Button(
             buttons,
             text="Save",
@@ -11440,21 +13869,21 @@ class ZanelApp:
                     save_button.configure(
                         text="Wait…",
                         state="disabled",
-                        bg="#1A2520",
+                        bg=self.theme["button"],
                         cursor="arrow",
                     )
                 elif has_changes():
                     save_button.configure(
                         text="Save",
                         state="normal",
-                        bg="#5CFF9D",
+                        bg=self.theme["accent"],
                         cursor="hand2",
                     )
                 else:
                     save_button.configure(
                         text="Save",
                         state="disabled",
-                        bg="#1A2520",
+                        bg=self.theme["button"],
                         cursor="arrow",
                     )
             except tk.TclError:
@@ -11640,6 +14069,909 @@ class ZanelApp:
 
         refresh_test_button()
 
+        self.recolor_tree(frame, DEFAULT_THEME, self.theme)
+
+    def recolor_tree(self, widget, source, target):
+        mapping = theme_color_map(source, target)
+
+        if mapping:
+            self.recolor_widget(widget, mapping)
+
+    def recolor_widget(self, widget, mapping):
+        if getattr(widget, "zanel_skip", False):
+            return
+
+        keep_fg = getattr(widget, "zanel_keep_fg", False)
+
+        for option in THEME_WIDGET_OPTIONS:
+            if keep_fg and option in (
+                "fg",
+                "activeforeground",
+                "disabledforeground",
+            ):
+                continue
+
+            try:
+                current = str(widget.cget(option)).lower()
+                replacement = mapping.get(current)
+
+                if replacement:
+                    widget.configure(**{option: replacement})
+            except tk.TclError:
+                continue
+
+        if isinstance(widget, ModernSlider):
+            for attribute in (
+                "bg_color",
+                "track_color",
+                "fill_color",
+                "handle_color",
+                "glow_color",
+            ):
+                replacement = mapping.get(
+                    str(getattr(widget, attribute)).lower()
+                )
+
+                if replacement:
+                    setattr(widget, attribute, replacement)
+
+            widget.draw()
+            return
+
+        if isinstance(widget, tk.Canvas):
+            try:
+                items = widget.find_all()
+            except tk.TclError:
+                items = ()
+
+            for item in items:
+                for option in ("fill", "outline"):
+                    try:
+                        current = str(
+                            widget.itemcget(item, option)
+                        ).lower()
+                        replacement = mapping.get(current)
+
+                        if replacement:
+                            widget.itemconfigure(
+                                item,
+                                **{option: replacement},
+                            )
+                    except tk.TclError:
+                        continue
+
+        try:
+            children = widget.winfo_children()
+        except tk.TclError:
+            return
+
+        for child in children:
+            self.recolor_widget(child, mapping)
+
+    def sync_window_background(self):
+        if platform.system() != "Windows":
+            return
+
+        color = self.theme["bg"]
+
+        if color == self._bg_brush_color:
+            return
+
+        try:
+            self.root.update_idletasks()
+
+            red, green, blue = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+            colorref = red | (green << 8) | (blue << 16)
+
+            gdi32 = ctypes.windll.gdi32
+            user32 = ctypes.windll.user32
+
+            gdi32.CreateSolidBrush.restype = ctypes.c_void_p
+            gdi32.CreateSolidBrush.argtypes = [ctypes.c_uint]
+            gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+
+            set_class = getattr(user32, "SetClassLongPtrW", None) or user32.SetClassLongW
+            set_class.restype = ctypes.c_void_p
+            set_class.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+
+            user32.GetParent.restype = ctypes.c_void_p
+            user32.GetParent.argtypes = [ctypes.c_void_p]
+
+            hwnd = user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+
+            brush = gdi32.CreateSolidBrush(colorref)
+            set_class(hwnd, -10, brush)
+
+            if self._bg_brush:
+                gdi32.DeleteObject(self._bg_brush)
+
+            self._bg_brush = brush
+            self._bg_brush_color = color
+        except Exception:
+            pass
+
+    def apply_theme(self, new_theme):
+        self.recolor_tree(self.root, self.theme, new_theme)
+        self.theme = dict(new_theme)
+        self.recolor_compact_window()
+        self.rebuild_skip_pulse()
+        self.sync_window_background()
+
+    def recolor_compact_window(self):
+        canvas = getattr(
+            self,
+            "compact_canvas",
+            None
+        )
+
+        if canvas is None:
+            return
+
+        try:
+            if not canvas.winfo_exists():
+                return
+        except tk.TclError:
+            return
+
+        canvas.itemconfigure(
+            "compact_border",
+            fill=self.theme["border"],
+        )
+
+        canvas.itemconfigure(
+            "compact_accent",
+            fill=self.theme["accent"],
+        )
+
+    def rebuild_skip_pulse(self):
+        start_color = blend_color(
+            self.theme["title"],
+            self.theme["accent"],
+            0.4,
+        )
+
+        forward = [
+            blend_color(
+                start_color,
+                self.theme["accent"],
+                step / 10,
+            )
+            for step in range(11)
+        ]
+
+        self.skip_pulse_colors = tuple(
+            forward + forward[-2:0:-1]
+        )
+
+        self.reset_skip_button_style()
+
+    def open_theme_editor(self):
+        parent = self.settings_frame
+
+        if parent is None or self.theme_editor is not None:
+            return
+
+        editor = tk.Frame(parent, bg="#0B0E14")
+        editor.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+        editor.lift()
+        self.theme_editor = editor
+
+        sv_width = 210
+        sv_height = 110
+        hue_width = 406
+
+        start_accent = THEME_PRESETS.get(
+            self.theme_name,
+            self.theme_accent,
+        )
+
+        start_h, start_s, start_v = hex_to_hsv(start_accent)
+
+        state = {
+            "h": min(start_h, 0.999),
+            "s": start_s,
+            "v": start_v,
+            "name": self.theme_name,
+            "job": None,
+        }
+
+        images = {"sv": None, "hue": None}
+        holders = {}
+
+        def current_hex():
+            return hsv_to_hex(state["h"], state["s"], state["v"])
+
+        def current_rgb():
+            value = current_hex()
+
+            return tuple(
+                int(value[index:index + 2], 16)
+                for index in (1, 3, 5)
+            )
+
+        save_state = {"until": 0.0, "job": None}
+        save_cooldown_seconds = 3.0
+
+        def close_editor(save):
+            for job_holder in (state, save_state):
+                if job_holder["job"] is not None:
+                    try:
+                        editor.after_cancel(job_holder["job"])
+                    except tk.TclError:
+                        pass
+
+                    job_holder["job"] = None
+
+            self.theme_editor = None
+
+            self.apply_theme(
+                get_theme(
+                    self.theme_name,
+                    self.theme_accent,
+                )
+            )
+
+            try:
+                editor.destroy()
+            except tk.TclError:
+                pass
+
+        header = tk.Frame(editor, bg="#0B0E14")
+        header.pack(fill="x", padx=16, pady=(10, 0))
+
+        tk.Button(
+            header,
+            text="←  Back",
+            command=lambda: close_editor(False),
+            fg="#DDF8E8",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#22312A",
+            borderwidth=0,
+            relief="flat",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+            font=("Segoe UI Symbol", 9, "bold"),
+        ).pack(side="left")
+
+        tk.Label(
+            header,
+            text="Theme",
+            fg="#F2F6FF",
+            bg="#0B0E14",
+            font=("Segoe UI", 12, "bold"),
+        ).pack(side="left", padx=(12, 0))
+
+        footer = tk.Frame(editor, bg="#0B0E14")
+        footer.pack(side="bottom", fill="x", padx=22, pady=(10, 14))
+
+        body = tk.Frame(editor, bg="#0B0E14")
+        body.pack(fill="both", expand=True, padx=22, pady=(10, 0))
+
+        presets_row = tk.Frame(body, bg="#0B0E14")
+        presets_row.pack(fill="x")
+
+        tk.Label(
+            presets_row,
+            text="Presets",
+            fg="#F2F6FF",
+            bg="#0B0E14",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left")
+
+        name_label = tk.Label(
+            presets_row,
+            text="",
+            fg="#8290A8",
+            bg="#0B0E14",
+            font=("Segoe UI", 9),
+        )
+        name_label.pack(side="right")
+
+        swatches = tk.Frame(body, bg="#0B0E14")
+        swatches.pack(anchor="w", pady=(4, 8))
+
+        picker_row = tk.Frame(body, bg="#0B0E14")
+        picker_row.pack(fill="x")
+
+        sv_canvas = tk.Canvas(
+            picker_row,
+            width=sv_width,
+            height=sv_height,
+            bg="#0B0E14",
+            highlightthickness=0,
+            bd=0,
+            cursor="crosshair",
+        )
+        sv_canvas.zanel_skip = True
+        sv_canvas.pack(side="left")
+
+        preview = tk.Frame(
+            picker_row,
+            height=sv_height,
+            bg="#101713",
+            highlightthickness=1,
+            highlightbackground="#293830",
+        )
+        preview.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=(14, 0),
+        )
+        preview.pack_propagate(False)
+
+        tk.Label(
+            preview,
+            text="PREVIEW",
+            fg="#8290A8",
+            bg="#101713",
+            font=("Segoe UI", 7, "bold"),
+        ).pack(anchor="w", padx=12, pady=(10, 0))
+
+        tk.Label(
+            preview,
+            text="Zanel: Hello there!",
+            fg="#E8F5ED",
+            bg="#101713",
+            font=("Segoe UI", 10),
+        ).pack(anchor="w", padx=12, pady=(6, 0))
+
+        preview_buttons = tk.Frame(preview, bg="#101713")
+        preview_buttons.pack(
+            side="bottom",
+            fill="x",
+            padx=12,
+            pady=(0, 12),
+        )
+
+        tk.Button(
+            preview_buttons,
+            text="● Mic",
+            fg="#DDF8E8",
+            bg="#17241D",
+            activeforeground="white",
+            activebackground="#013220",
+            borderwidth=0,
+            relief="flat",
+            pady=5,
+            font=("Segoe UI", 8, "bold"),
+        ).pack(side="left", fill="x", expand=True)
+
+        tk.Button(
+            preview_buttons,
+            text="Clear",
+            fg="#DDF8E8",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#22312A",
+            borderwidth=0,
+            relief="flat",
+            pady=5,
+            font=("Segoe UI", 8, "bold"),
+        ).pack(side="left", fill="x", expand=True, padx=(5, 0))
+
+        tk.Button(
+            preview_buttons,
+            text="Send",
+            fg="#071019",
+            bg="#5CFF9D",
+            activeforeground="#071019",
+            activebackground="#72FFAB",
+            borderwidth=0,
+            relief="flat",
+            pady=5,
+            font=("Segoe UI", 8, "bold"),
+        ).pack(side="left", fill="x", expand=True, padx=(5, 0))
+
+        hue_canvas = tk.Canvas(
+            body,
+            width=hue_width,
+            height=12,
+            bg="#0B0E14",
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        hue_canvas.zanel_skip = True
+        hue_canvas.pack(anchor="w", pady=(10, 0))
+
+        fields = tk.Frame(body, bg="#0B0E14")
+        fields.pack(fill="x", pady=(10, 0))
+
+        hex_var = tk.StringVar()
+        r_var = tk.StringVar()
+        g_var = tk.StringVar()
+        b_var = tk.StringVar()
+
+        def make_field(label, variable, width):
+            tk.Label(
+                fields,
+                text=label,
+                fg="#8290A8",
+                bg="#0B0E14",
+                font=("Segoe UI", 8, "bold"),
+            ).pack(side="left", padx=(0, 5))
+
+            entry = tk.Entry(
+                fields,
+                textvariable=variable,
+                width=width,
+                justify="center",
+                bg="#121A16",
+                fg="#E8F5ED",
+                insertbackground="white",
+                relief="flat",
+                borderwidth=0,
+                font=("Segoe UI", 10),
+            )
+            entry.pack(side="left", ipady=4, padx=(0, 12))
+
+            return entry
+
+        hex_entry = make_field("HEX", hex_var, 8)
+        r_entry = make_field("R", r_var, 4)
+        g_entry = make_field("G", g_var, 4)
+        b_entry = make_field("B", b_var, 4)
+
+        chip = tk.Frame(
+            fields,
+            width=34,
+            height=26,
+            bg=current_hex(),
+        )
+        chip.zanel_skip = True
+        chip.pack(side="right")
+        chip.pack_propagate(False)
+
+        hue_image = tk.PhotoImage(width=hue_width // 2, height=1)
+        hue_image.put(
+            "{"
+            + " ".join(
+                hsv_to_hex(x / float(hue_width // 2), 1.0, 1.0)
+                for x in range(hue_width // 2)
+            )
+            + "}"
+        )
+        images["hue"] = hue_image.zoom(2, 12)
+
+        hue_canvas.create_image(
+            0,
+            0,
+            image=images["hue"],
+            anchor="nw",
+        )
+
+        def draw_hue_marker():
+            hue_canvas.delete("marker")
+            x = state["h"] * (hue_width - 1)
+
+            hue_canvas.create_rectangle(
+                x - 3,
+                0,
+                x + 3,
+                12,
+                outline="#FFFFFF",
+                width=2,
+                tags="marker",
+            )
+
+        def draw_sv_marker():
+            sv_canvas.delete("marker")
+            x = state["s"] * (sv_width - 1)
+            y = (1.0 - state["v"]) * (sv_height - 1)
+
+            sv_canvas.create_oval(
+                x - 7,
+                y - 7,
+                x + 7,
+                y + 7,
+                outline="#000000",
+                width=2,
+                tags="marker",
+            )
+
+            sv_canvas.create_oval(
+                x - 5,
+                y - 5,
+                x + 5,
+                y + 5,
+                outline="#FFFFFF",
+                width=2,
+                tags="marker",
+            )
+
+        def render_sv():
+            small_width = sv_width // 2
+            small_height = sv_height // 2
+
+            image = tk.PhotoImage(
+                width=small_width,
+                height=small_height,
+            )
+
+            rows = []
+
+            for y in range(small_height):
+                value = 1.0 - y / (small_height - 1)
+
+                rows.append(
+                    "{"
+                    + " ".join(
+                        hsv_to_hex(
+                            state["h"],
+                            x / (small_width - 1),
+                            value,
+                        )
+                        for x in range(small_width)
+                    )
+                    + "}"
+                )
+
+            image.put(" ".join(rows))
+            images["sv"] = image.zoom(2, 2)
+
+            sv_canvas.delete("all")
+
+            sv_canvas.create_image(
+                0,
+                0,
+                image=images["sv"],
+                anchor="nw",
+            )
+
+            draw_sv_marker()
+
+        def refresh_swatches():
+            for preset_name, holder in holders.items():
+                try:
+                    holder.configure(
+                        bg=(
+                            "#FFFFFF"
+                            if state["name"] == preset_name
+                            else self.theme["bg"]
+                        )
+                    )
+                except tk.TclError:
+                    pass
+
+        def update_info():
+            red, green, blue = current_rgb()
+
+            hex_var.set(current_hex().upper())
+            r_var.set(str(red))
+            g_var.set(str(green))
+            b_var.set(str(blue))
+
+            try:
+                chip.configure(bg=current_hex())
+            except tk.TclError:
+                pass
+
+            name_label.configure(text=state["name"])
+
+        def schedule_preview():
+            if state["job"] is not None:
+                return
+
+            def run():
+                state["job"] = None
+
+                if self.theme_editor is not editor:
+                    return
+
+                self.apply_theme(
+                    get_theme(
+                        state["name"],
+                        current_hex(),
+                    )
+                )
+
+                refresh_swatches()
+
+            try:
+                state["job"] = editor.after(40, run)
+            except tk.TclError:
+                state["job"] = None
+
+        def refresh_all():
+            render_sv()
+            draw_hue_marker()
+            update_info()
+            refresh_swatches()
+            schedule_preview()
+
+        def choose_preset(name):
+            h, s, v = hex_to_hsv(THEME_PRESETS[name])
+
+            state["name"] = name
+            state["h"] = min(h, 0.999)
+            state["s"] = s
+            state["v"] = v
+
+            refresh_all()
+
+        def set_sv(event):
+            state["s"] = max(0.0, min(1.0, event.x / float(sv_width - 1)))
+            state["v"] = max(
+                0.0,
+                min(1.0, 1.0 - event.y / float(sv_height - 1)),
+            )
+            state["name"] = "Custom"
+
+            draw_sv_marker()
+            update_info()
+            refresh_swatches()
+            schedule_preview()
+
+        def set_hue(event):
+            state["h"] = max(
+                0.0,
+                min(0.999, event.x / float(hue_width - 1)),
+            )
+            state["name"] = "Custom"
+
+            render_sv()
+            draw_hue_marker()
+            update_info()
+            refresh_swatches()
+            schedule_preview()
+
+        def apply_hex(_event=None):
+            if self.theme_editor is not editor:
+                return
+
+            raw = hex_var.get().strip()
+
+            if not raw.startswith("#"):
+                raw = "#" + raw
+
+            value = normalize_hex(raw)
+
+            if not value:
+                update_info()
+                return
+
+            h, s, v = hex_to_hsv(value)
+
+            state["h"] = min(h, 0.999)
+            state["s"] = s
+            state["v"] = v
+            state["name"] = "Custom"
+
+            refresh_all()
+
+        def apply_rgb(_event=None):
+            if self.theme_editor is not editor:
+                return
+
+            try:
+                red = max(0, min(255, int(r_var.get().strip())))
+                green = max(0, min(255, int(g_var.get().strip())))
+                blue = max(0, min(255, int(b_var.get().strip())))
+            except ValueError:
+                update_info()
+                return
+
+            h, s, v = colorsys.rgb_to_hsv(
+                red / 255.0,
+                green / 255.0,
+                blue / 255.0,
+            )
+
+            if s > 0 and v > 0:
+                state["h"] = min(h, 0.999)
+
+            state["s"] = s
+            state["v"] = v
+            state["name"] = "Custom"
+
+            refresh_all()
+
+        def step_channel(variable, amount):
+            try:
+                value = int(variable.get().strip())
+            except ValueError:
+                value = 0
+
+            variable.set(str(max(0, min(255, value + amount))))
+            apply_rgb()
+
+        for entry, variable in (
+            (r_entry, r_var),
+            (g_entry, g_var),
+            (b_entry, b_var),
+        ):
+            entry.bind("<Return>", apply_rgb)
+            entry.bind("<FocusOut>", apply_rgb)
+
+            entry.bind(
+                "<MouseWheel>",
+                lambda event, v=variable: step_channel(
+                    v,
+                    (1 if event.delta > 0 else -1)
+                    * (10 if event.state & 0x1 else 1),
+                ),
+            )
+
+            entry.bind(
+                "<Up>",
+                lambda event, v=variable: (
+                    step_channel(
+                        v,
+                        10 if event.state & 0x1 else 1,
+                    ),
+                    "break",
+                )[1],
+            )
+
+            entry.bind(
+                "<Down>",
+                lambda event, v=variable: (
+                    step_channel(
+                        v,
+                        -10 if event.state & 0x1 else -1,
+                    ),
+                    "break",
+                )[1],
+            )
+
+        hex_entry.bind("<Return>", apply_hex)
+        hex_entry.bind("<FocusOut>", apply_hex)
+
+        for preset_name, preset_accent in THEME_PRESETS.items():
+            holder = tk.Frame(swatches, bg="#0B0E14")
+            holder.pack(side="left", padx=(0, 6))
+            holders[preset_name] = holder
+
+            swatch = tk.Frame(
+                holder,
+                width=34,
+                height=20,
+                bg=preset_accent,
+                cursor="hand2",
+            )
+            swatch.zanel_skip = True
+            swatch.pack(padx=2, pady=2)
+
+            swatch.bind(
+                "<Button-1>",
+                lambda _event, n=preset_name: choose_preset(n),
+            )
+
+            swatch.bind(
+                "<Enter>",
+                lambda _event, n=preset_name: name_label.configure(
+                    text=n
+                ),
+            )
+
+            swatch.bind(
+                "<Leave>",
+                lambda _event: name_label.configure(
+                    text=state["name"]
+                ),
+            )
+
+        sv_canvas.bind("<ButtonPress-1>", set_sv)
+        sv_canvas.bind("<B1-Motion>", set_sv)
+        hue_canvas.bind("<ButtonPress-1>", set_hue)
+        hue_canvas.bind("<B1-Motion>", set_hue)
+
+        tk.Button(
+            footer,
+            text="Reset to default",
+            command=lambda: choose_preset(DEFAULT_THEME_NAME),
+            fg="#DDF8E8",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#22312A",
+            borderwidth=0,
+            relief="flat",
+            padx=14,
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+
+        save_button = tk.Button(
+            footer,
+            text="Apply & Save",
+            fg="#071019",
+            bg="#5CFF9D",
+            activeforeground="#071019",
+            activebackground="#72FFAB",
+            disabledforeground="#5B6660",
+            borderwidth=0,
+            relief="flat",
+            padx=18,
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        )
+        save_button.pack(side="right")
+
+        def update_save_button():
+            save_state["job"] = None
+
+            if self.theme_editor is not editor:
+                return
+
+            remaining = save_state["until"] - time.time()
+
+            try:
+                if remaining > 0:
+                    save_button.configure(
+                        text=f"Wait {math.ceil(remaining)}s",
+                        state="disabled",
+                        bg=self.theme["button"],
+                        cursor="arrow",
+                    )
+
+                    save_state["job"] = editor.after(
+                        250,
+                        update_save_button,
+                    )
+                else:
+                    save_button.configure(
+                        text="Apply & Save",
+                        state="normal",
+                        bg=self.theme["accent"],
+                        cursor="hand2",
+                    )
+            except tk.TclError:
+                save_state["job"] = None
+
+        def save_theme():
+            if time.time() < save_state["until"]:
+                return
+
+            if self.theme_editor is not editor:
+                return
+
+            accent = current_hex()
+
+            if state["name"] in THEME_PRESETS:
+                accent = THEME_PRESETS[state["name"]]
+
+            self.theme_name = state["name"]
+            self.theme_accent = accent
+            self.persist_settings()
+
+            self.apply_theme(
+                get_theme(
+                    self.theme_name,
+                    self.theme_accent,
+                )
+            )
+
+            refresh_swatches()
+
+            save_state["until"] = (
+                time.time() + save_cooldown_seconds
+            )
+
+            if save_state["job"] is not None:
+                try:
+                    editor.after_cancel(save_state["job"])
+                except tk.TclError:
+                    pass
+
+                save_state["job"] = None
+
+            update_save_button()
+
+        save_button.configure(command=save_theme)
+
+        render_sv()
+        draw_hue_marker()
+        update_info()
+
+        self.recolor_tree(editor, DEFAULT_THEME, self.theme)
+
+        refresh_swatches()
+
     def build_ui(self):
         self.titlebar = tk.Frame(
             self.root,
@@ -11691,7 +15023,7 @@ class ZanelApp:
             command=self.close,
             image=self.titlebar_pixel,
             compound="center",
-            width=46,
+            width=38,
             height=42,
             fg="#b9c2d0",
             bg="#0D1713",
@@ -11715,7 +15047,7 @@ class ZanelApp:
             command=self.minimize_window,
             image=self.titlebar_pixel,
             compound="center",
-            width=46,
+            width=38,
             height=42,
             fg="#b9c2d0",
             bg="#0D1713",
@@ -11739,7 +15071,7 @@ class ZanelApp:
             command=self.open_settings,
             image=self.titlebar_pixel,
             compound="center",
-            width=46,
+            width=38,
             height=42,
             fg="#b9c2d0",
             bg="#0D1713",
@@ -11753,6 +15085,30 @@ class ZanelApp:
             cursor="hand2",
         )
         settings_button.pack(
+            side="right",
+            fill="y",
+        )
+
+        info_button = tk.Button(
+            self.titlebar,
+            text="ⓘ",
+            command=self.show_disclaimer,
+            image=self.titlebar_pixel,
+            compound="center",
+            width=38,
+            height=42,
+            fg="#b9c2d0",
+            bg="#0D1713",
+            activeforeground="white",
+            activebackground="#2d405c",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=0,
+            pady=0,
+            font=("Segoe UI Symbol", 13),
+            cursor="hand2",
+        )
+        info_button.pack(
             side="right",
             fill="y",
         )
@@ -11843,20 +15199,321 @@ class ZanelApp:
             expand=True,
         )
 
-        controls = tk.Frame(
+        self.rail = tk.Frame(
             body,
-            bg="#0b0e14",
+            bg="#0D1713",
+            width=RAIL_WIDTH,
+        )
+        self.rail.pack(side="left", fill="y")
+        self.rail.pack_propagate(False)
+
+        self.sidebar_toggle = tk.Button(
+            self.rail,
+            text="›",
+            command=self.toggle_sidebar,
+            fg="#B9C2D0",
+            bg="#0D1713",
+            activeforeground="white",
+            activebackground="#1A2520",
+            borderwidth=0,
+            highlightthickness=0,
+            relief="flat",
+            padx=0,
+            pady=0,
+            cursor="hand2",
+            font=("Segoe UI Symbol", 12, "bold"),
+        )
+        self.sidebar_toggle.pack(side="top", fill="x", pady=(10, 0), ipady=4)
+
+        self.sidebar = tk.Frame(
+            body,
+            bg="#101713",
+            width=SIDEBAR_WIDTH,
+        )
+        self.sidebar.pack_propagate(False)
+
+        side_head = tk.Frame(self.sidebar, bg="#101713")
+        side_head.pack(fill="x", padx=14, pady=(14, 8))
+
+        tk.Label(
+            side_head,
+            text="Chats",
+            fg="#F2F6FF",
+            bg="#101713",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(side="left")
+
+        self.sidebar_count = tk.Label(
+            side_head,
+            text=f"0/{MAX_CHATS}",
+            fg="#8290A8",
+            bg="#101713",
+            font=("Segoe UI", 8),
+        )
+        self.sidebar_count.pack(side="right")
+
+        self.new_chat_button = tk.Button(
+            self.sidebar,
+            text="+  New chat",
+            command=lambda: self.new_chat(False),
+            fg="#071019",
+            bg="#5CFF9D",
+            activeforeground="#071019",
+            activebackground="#72FFAB",
+            borderwidth=0,
+            relief="flat",
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.new_chat_button.pack(fill="x", padx=12)
+
+        self.anon_chat_button = tk.Button(
+            self.sidebar,
+            text="◌  Anonymous chat",
+            command=lambda: self.new_chat(True),
+            fg="#DDF8E8",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#22312A",
+            borderwidth=0,
+            relief="flat",
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI Symbol", 9, "bold"),
+        )
+        self.anon_chat_button.pack(fill="x", padx=12, pady=(6, 0))
+
+        tk.Frame(
+            self.sidebar,
+            bg="#293830",
+            height=1,
+        ).pack(fill="x", padx=12, pady=(12, 6))
+
+        list_holder = tk.Frame(self.sidebar, bg="#101713")
+        list_holder.pack(fill="both", expand=True, padx=(6, 4), pady=(0, 8))
+
+        self.chat_canvas = tk.Canvas(
+            list_holder,
+            bg="#101713",
+            highlightthickness=0,
+            bd=0,
+            yscrollincrement=24,
+        )
+        self.chat_canvas.pack(fill="both", expand=True)
+
+        self.chat_list = tk.Frame(self.chat_canvas, bg="#101713")
+        self.chat_list_window = self.chat_canvas.create_window(
+            (0, 0),
+            window=self.chat_list,
+            anchor="nw",
         )
 
-        controls.pack(
-            side="bottom",
-            fill="x",
-            padx=10,
-            pady=(0, 8),
+        def sync_scroll(_event=None):
+            try:
+                self.chat_canvas.configure(
+                    scrollregion=self.chat_canvas.bbox("all") or (0, 0, 0, 0)
+                )
+            except tk.TclError:
+                pass
+
+        def sync_width(event):
+            try:
+                self.chat_canvas.itemconfigure(
+                    self.chat_list_window,
+                    width=max(1, event.width),
+                )
+            except tk.TclError:
+                pass
+
+        self.chat_list.bind("<Configure>", sync_scroll)
+        self.chat_canvas.bind("<Configure>", sync_width)
+
+        self.content = tk.Frame(body, bg="#0B0E14")
+        self.content.pack(side="left", fill="both", expand=True)
+
+        controls = tk.Frame(self.content, bg="#0B0E14")
+        controls.pack(side="bottom", fill="x", padx=12, pady=(0, 12))
+
+        top_row = tk.Frame(controls, bg="#0B0E14")
+        top_row.pack(side="top", fill="x")
+
+        tool_row = tk.Frame(controls, bg="#0B0E14")
+        tool_row.pack(side="top", fill="x", pady=(8, 0))
+
+        send = tk.Button(
+            top_row,
+            text="Send",
+            command=self.send_manual,
+            fg="#071019",
+            bg="#5CFF9D",
+            activeforeground="#071019",
+            activebackground="#72FFAB",
+            borderwidth=0,
+            relief="flat",
+            padx=20,
+            pady=9,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+            highlightthickness=0,
         )
+        send.pack(side="right", padx=(8, 0), fill="y")
+
+        self.upload_button = tk.Button(
+            top_row,
+            text="+",
+            command=self.toggle_screenshot,
+            fg="#C8D8D0",
+            bg="#17211D",
+            activeforeground="#FFFFFF",
+            activebackground="#22312A",
+            borderwidth=0,
+            relief="flat",
+            padx=14,
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI", 11, "bold"),
+            highlightthickness=1,
+            highlightbackground="#293830",
+            highlightcolor="#5CFF9D",
+        )
+        self.upload_button.pack(side="right", padx=(8, 0), fill="y")
+
+        entry_wrap = tk.Frame(
+            top_row,
+            bg="#121A16",
+            highlightthickness=1,
+            highlightbackground="#293830",
+            highlightcolor="#5CFF9D",
+        )
+        entry_wrap.pack(side="left", fill="x", expand=True)
+
+        self.manual = tk.Entry(
+            entry_wrap,
+            bg="#121A16",
+            fg="#E8F5ED",
+            insertbackground="white",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Segoe UI", 10),
+        )
+        self.manual.pack(fill="x", padx=12, pady=9)
+
+        self.manual.bind("<<Paste>>", self.on_paste)
+        self.manual.insert(0, INPUT_PLACEHOLDER)
+        self.manual.configure(fg="#6F7A74")
+
+        def focus_in(_event=None):
+            if self.manual.get() == INPUT_PLACEHOLDER:
+                self.manual.delete(0, tk.END)
+                self.manual.configure(fg="#E8F5ED")
+
+            entry_wrap.configure(highlightbackground=self.theme["accent"])
+
+        def focus_out(_event=None):
+            if not self.manual.get().strip():
+                self.manual.delete(0, tk.END)
+                self.manual.insert(0, INPUT_PLACEHOLDER)
+                self.manual.configure(fg="#6F7A74")
+
+            entry_wrap.configure(highlightbackground=self.theme["border"])
+
+        self.manual.bind("<FocusIn>", focus_in)
+        self.manual.bind("<FocusOut>", focus_out)
+        self.manual.bind("<Return>", lambda _event: self.send_manual())
+
+        self.attachment_label = tk.Label(
+            tool_row,
+            text="",
+            fg="#5CFF9D",
+            bg="#0B0E14",
+            font=("Segoe UI", 8),
+        )
+
+        self.mic_button = tk.Button(
+            tool_row,
+            text="●  Mic ON",
+            command=self.toggle_mic,
+            fg="#DDF8E8",
+            bg="#17241D",
+            activeforeground="white",
+            activebackground="#013220",
+            borderwidth=0,
+            relief="flat",
+            padx=14,
+            pady=7,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.mic_button.pack(side="left")
+
+        clear_button = tk.Button(
+            tool_row,
+            text="Clear",
+            command=self.clear_chat,
+            fg="#DDF8E8",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#c43f52",
+            borderwidth=0,
+            relief="flat",
+            padx=14,
+            pady=7,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        )
+        clear_button.pack(side="left", padx=(8, 0))
+
+        tk.Label(
+            tool_row,
+            text="Enter to send",
+            fg="#56677A",
+            bg="#0B0E14",
+            font=("Segoe UI", 8),
+        ).pack(side="right")
+
+        self.paste_bar = tk.Frame(
+            self.content,
+            bg="#1A2520",
+            highlightthickness=1,
+            highlightbackground="#293830",
+        )
+
+        self.paste_label = tk.Label(
+            self.paste_bar,
+            text="",
+            fg="#5CFF9D",
+            bg="#1A2520",
+            anchor="w",
+            cursor="hand2",
+            padx=10,
+            pady=6,
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.paste_label.pack(side="left", fill="x", expand=True)
+        self.paste_label.bind(
+            "<Button-1>",
+            lambda _event: self.view_pending_paste(),
+        )
+
+        tk.Button(
+            self.paste_bar,
+            text="×",
+            command=self.clear_pending_paste,
+            fg="#B9C2D0",
+            bg="#1A2520",
+            activeforeground="white",
+            activebackground="#c43f52",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=10,
+            cursor="hand2",
+            font=("Segoe UI Symbol", 11),
+        ).pack(side="right", fill="y")
 
         self.chat = tk.Text(
-            body,
+            self.content,
             height=1,
             width=1,
             wrap="word",
@@ -11867,9 +15524,10 @@ class ZanelApp:
             selectbackground="#2d405c",
             relief="flat",
             borderwidth=0,
-            padx=13,
+            padx=14,
             pady=12,
             font=("Segoe UI", 10),
+            yscrollcommand=self.on_chat_yscroll,
         )
 
         self.chat.tag_configure(
@@ -11886,172 +15544,69 @@ class ZanelApp:
             side="top",
             fill="both",
             expand=True,
-            padx=10,
-            pady=10,
-        )
-
-        self.mic_button = tk.Button(
-            controls,
-            text="●  Mic ON",
-            command=self.toggle_mic,
-            fg="#DDF8E8",
-            bg="#17241D",
-            activeforeground="white",
-            activebackground="#013220",
-            borderwidth=0,
-            relief="flat",
             padx=12,
-            pady=8,
-            cursor="hand2",
-            font=("Segoe UI", 9, "bold"),
-        )
-        self.mic_button.pack(side="left")
-
-        clear_button = tk.Button(
-            controls,
-            text="Clear",
-            command=self.clear_chat,
-            fg="#DDF8E8",
-            bg="#1A2520",
-            activeforeground="white",
-            activebackground="#c43f52",
-            borderwidth=0,
-            relief="flat",
-            padx=10,
-            pady=8,
-            cursor="hand2",
-            font=("Segoe UI", 9, "bold"),
-        )
-        clear_button.pack(
-            side="left",
-            padx=(6, 0),
+            pady=(12, 10),
         )
 
-        self.manual = tk.Entry(
-            controls,
-            bg="#121A16",
-            fg="#E8F5ED",
-            insertbackground="white",
-            relief="flat",
-            borderwidth=0,
-            font=("Segoe UI", 10),
+        self.loading_label = tk.Label(
+            self.content,
+            text="Loading chat…",
+            fg="#8290A8",
+            bg="#101713",
+            font=("Segoe UI", 10, "bold"),
         )
 
-        self.manual.pack(
-            side="left",
-            fill="x",
-            expand=True,
-            padx=8,
-            ipady=7,
-        )
+        self.root.bind_all("<MouseWheel>", self.on_global_wheel, add="+")
 
-        placeholder = "Ask Zanel anything"
+    def show_disclaimer(self):
+        threading.Thread(
+            target=self._show_disclaimer_dialog,
+            daemon=True
+        ).start()
 
-        self.manual.insert(
+    def open_official_website(self):
+        threading.Thread(
+            target=self._open_official_website_dialog,
+            daemon=True
+        ).start()
+
+    def _open_official_website_dialog(self):
+        response = ctypes.windll.user32.MessageBoxW(
             0,
-            placeholder
+            "Open the official Zanel Assistant website in your browser?",
+            "Open Official Website",
+            0x00000004 | 0x00000020 | 0x00010000,
         )
 
-        self.manual.configure(
-            fg="#6F7A74"
-        )
+        if response != 6:
+            return
 
-        def clear_placeholder(_event=None):
-            if self.manual.get() == placeholder:
-                self.manual.delete(
-                    0,
-                    tk.END
-                )
-                self.manual.configure(
-                    fg="#E8F5ED"
-                )
+        try:
+            webbrowser.open(OFFICIAL_WEBSITE_URL)
+        except Exception:
+            pass
 
-        def restore_placeholder(_event=None):
-            if not self.manual.get().strip():
-                self.manual.delete(
-                    0,
-                    tk.END
-                )
-                self.manual.insert(
-                    0,
-                    placeholder
-                )
-                self.manual.configure(
-                    fg="#6F7A74"
-                )
-
-        self.manual.bind(
-            "<FocusIn>",
-            clear_placeholder
-        )
-
-        self.manual.bind(
-            "<FocusOut>",
-            restore_placeholder
-        )
-
-        self.manual.bind(
-            "<Return>",
-            lambda _event: self.send_manual()
-        )
-
-        self.attachment_label = tk.Label(
-            controls,
-            text="",
-            fg="#5CFF9D",
-            bg="#0b0e14",
-            font=("Segoe UI", 8),
-        )
-
-        self.upload_button = tk.Button(
-            controls,
-            text="+",
-            command=self.toggle_screenshot,
-            fg="#C8D8D0",
-            bg="#17211D",
-            activeforeground="#FFFFFF",
-            activebackground="#22312A",
-            borderwidth=0,
-            relief="flat",
-            padx=12,
-            pady=8,
-            cursor="hand2",
-            font=("Segoe UI", 11, "bold"),
-            highlightthickness=1,
-            highlightbackground="#293830",
-            highlightcolor="#5CFF9D",
-        )
-
-        self.upload_button.pack(
-            side="right",
-            padx=(5, 6),
-        )
-
-        send = tk.Button(
-            controls,
-            text="Send",
-            command=self.send_manual,
-            fg="#071019",
-            bg="#5CFF9D",
-            activeforeground="#071019",
-            activebackground="#72FFAB",
-            borderwidth=0,
-            relief="flat",
-            padx=17,
-            pady=8,
-            cursor="hand2",
-            font=("Segoe UI", 9, "bold"),
-            highlightthickness=0,
-        )
-
-        send.pack(
-            side="right",
+    def _show_disclaimer_dialog(self):
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "AI can make mistakes, so don't believe everything it says. "
+            "Always double-check anything important.\n\n"
+            "You can manually delete individual chats whenever you want.",
+            "About Zanel's AI",
+            0x00000040 | 0x00010000 | 0x00040000,
         )
 
     def close(self):
         self.stop_rickroll()
         self.running = False
         self.mic_muted = True
+
+        try:
+            self.root.withdraw()
+        except tk.TclError:
+            pass
+
+        self.shutdown_cleanup()
 
         try:
             self.cleanup_music_file()
@@ -12221,8 +15776,9 @@ class ZanelApp:
 
         canvas.create_polygon(
             *rounded_points(0, 0, w - 1, h - 1, r),
-            fill="#1C2B23",
-            outline=""
+            fill=self.theme["border"],
+            outline="",
+            tags=("compact_border",),
         )
 
         canvas.create_polygon(
@@ -12235,12 +15791,13 @@ class ZanelApp:
             w // 2,
             66,
             text="⌬",
-            fill="#5CFF9D",
+            fill=self.theme["accent"],
             font=(
                 "Segoe UI Symbol",
                 38,
                 "bold"
-            )
+            ),
+            tags=("compact_accent",),
         )
 
         canvas.create_text(
@@ -12326,7 +15883,7 @@ class ZanelApp:
             try:
                 canvas.itemconfigure(
                     hover_circle,
-                    fill="#0D1713"
+                    fill=self.theme["title"]
                 )
 
                 canvas.itemconfigure(
@@ -12407,6 +15964,8 @@ class ZanelApp:
         window.update_idletasks()
         window.deiconify()
         window.lift()
+
+        self.recolor_tree(window, DEFAULT_THEME, self.theme)
 
     def compact_start_drag(self, event):
         if getattr(self, "closed", False):
@@ -12614,6 +16173,20 @@ class ZanelApp:
             if compact:
                 try:
                     if compact.winfo_exists():
+                        compact_x = compact.winfo_x()
+                        compact_y = compact.winfo_y()
+
+                        normal_geometry = self.normal_geometry or self.root.geometry()
+                        normal_size = re.match(
+                            r"(\d+x\d+)",
+                            normal_geometry
+                        )
+
+                        if normal_size:
+                            self.normal_geometry = (
+                                f"{normal_size.group(1)}+{compact_x}+{compact_y}"
+                            )
+
                         compact.destroy()
                 except tk.TclError:
                     pass
@@ -12709,38 +16282,25 @@ class ZanelApp:
         except tk.TclError:
             pass
 
-    def start_drag(self, event):
-        self.drag_x = (
-            event.x_root - self.root.winfo_x()
-        )
-        self.drag_y = (
-            event.y_root - self.root.winfo_y()
-        )
-
-    def drag_window(self, event):
-        if not self.running:
-            return
-
-        x = event.x_root - self.drag_x
-        y = event.y_root - self.drag_y
-
-        try:
-            self.root.geometry(
-                f"+{x}+{y}"
-            )
-        except tk.TclError:
-            pass
+    @property
+    def ai_busy(self):
+        return self.active_chat_id in self.busy_chats
 
     def can_send_message(self):
         now = time.time()
 
         if self.ai_busy:
+            self.flash_state("Wait for this chat's reply")
             return False
 
-        if (
-            now - self.last_message_time
-            < self.message_cooldown
-        ):
+        if self.busy_chats:
+            self.flash_state("Wait for the other chat's reply")
+            return False
+
+        remaining = self.message_cooldown - (now - self.last_message_time)
+
+        if remaining > 0:
+            self.flash_state(f"Wait {math.ceil(remaining)}s before sending")
             return False
 
         self.last_message_time = now
@@ -12945,9 +16505,183 @@ class ZanelApp:
             f"{codepoints}.png"
         )
 
+    def begin_render(self, index):
+        self.chat.configure(state="normal")
+        self.chat.mark_set("render_pos", index)
+        self.chat.mark_gravity("render_pos", "right")
+
+    def end_render(self):
+        try:
+            self.chat.mark_unset("render_pos")
+        except tk.TclError:
+            pass
+
+        self.chat.configure(state="disabled")
+
+    def reset_chat_view(self):
+        try:
+            self.chat.configure(state="normal")
+            self.chat.delete("1.0", "end")
+            self.chat.configure(state="disabled")
+        except tk.TclError:
+            pass
+
+        self._chat_images.clear()
+
+    def display_entry(self, entry):
+        if self.chat_loading:
+            self.deferred_entries.append(entry)
+            return
+
+        try:
+            self.begin_render("end-1c")
+            self.render_entry(entry, None)
+        except tk.TclError:
+            pass
+        finally:
+            try:
+                self.end_render()
+            except tk.TclError:
+                pass
+
+        try:
+            self.chat.see("end")
+        except tk.TclError:
+            pass
+
+    def show_text(self, who, text):
+        self.display_entry(make_entry(who, text))
+
+    def handle_chat_message(self, chat_id, entry):
+        if entry["who"] != "System":
+            self.chat_store.append(chat_id, entry)
+
+        if chat_id == self.active_chat_id:
+            self.display_entry(entry)
+
+    def render_entry(self, entry, index=None):
+        self.chat.insert("render_pos", f"{entry.get('who', '')}: ")
+        self.insert_rich(self.format_message(entry.get("text", "")))
+
+        paste = entry.get("paste")
+
+        if paste:
+            self.chat.insert("render_pos", "\n")
+            self.insert_paste_box(paste, entry.get("who", ""))
+
+        image = entry.get("image")
+
+        if image:
+            self.chat.insert("render_pos", "\n")
+
+            recent = (
+                index is None
+                or index >= len(self.history_entries) - RECENT_IMAGE_LIMIT
+            )
+
+            if recent and os.path.isfile(image):
+                self.insert_chat_thumbnail(image)
+            else:
+                self.chat.insert("render_pos", "[Image not shown]")
+
+        self.chat.insert("render_pos", "\n\n")
+
+    def insert_rich(self, text):
+        pattern = re.compile(r"\*\*(.+?)\*\*|\*(.+?)\*")
+        position = 0
+
+        for match in pattern.finditer(text):
+            if match.start() > position:
+                self.insert_segment(text[position:match.start()])
+
+            if match.group(1) is not None:
+                self.insert_segment(match.group(1), "bold")
+            else:
+                self.insert_segment(match.group(2), "italic")
+
+            position = match.end()
+
+        if position < len(text):
+            self.insert_segment(text[position:])
+
+    def insert_segment(self, value, tag=None):
+        if not value:
+            return
+
+        for part_type, part in self.split_emoji_text(value):
+            if part_type == "emoji":
+                self.insert_emoji(part)
+            elif tag:
+                self.chat.insert("render_pos", part, tag)
+            else:
+                self.chat.insert("render_pos", part)
+
+    def insert_paste_box(self, paste, who=""):
+        is_reply = who not in ("", "You")
+        heading = "Long response" if is_reply else "Pasted message"
+        hint = "click to read" if is_reply else "click to view"
+
+        box = tk.Frame(
+            self.chat,
+            bg=self.theme["button"],
+            highlightthickness=1,
+            highlightbackground=self.theme["border"],
+            cursor="hand2",
+        )
+
+        title = tk.Label(
+            box,
+            text=heading,
+            fg=self.theme["accent"],
+            bg=self.theme["button"],
+            cursor="hand2",
+            font=("Segoe UI", max(8, self.font_size - 1), "bold"),
+        )
+        title.pack(anchor="w", padx=10, pady=(6, 0))
+
+        info = tk.Label(
+            box,
+            text=f"{len(paste):,} characters  ·  {hint}",
+            fg="#8290A8",
+            bg=self.theme["button"],
+            cursor="hand2",
+            font=("Segoe UI", 8),
+        )
+        info.pack(anchor="w", padx=10, pady=(0, 6))
+
+        for widget in (box, title, info):
+            widget.bind(
+                "<Button-1>",
+                lambda _event, value=paste, name=heading: self.open_paste_viewer(
+                    value,
+                    title=name,
+                ),
+            )
+
+        self.chat.window_create("render_pos", window=box, padx=0, pady=2)
+
+    def insert_chat_thumbnail(self, path):
+        try:
+            image = Image.open(path).convert("RGB")
+            image.thumbnail((280, 200), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(image)
+
+            label = tk.Label(
+                self.chat,
+                image=photo,
+                bg=self.theme["panel"],
+                bd=0,
+                highlightthickness=0,
+            )
+
+            self.chat.window_create("render_pos", window=label)
+            self._chat_images.append((photo, label))
+        except Exception:
+            self.chat.insert("render_pos", "[Unable to display image]")
+
     def place_emoji_image(self, photo):
         self.chat.image_create(
-            "end",
+            "render_pos",
             image=photo,
             align="center",
             padx=1,
@@ -12955,563 +16689,111 @@ class ZanelApp:
 
     def insert_emoji(self, emoji):
         try:
-            if not hasattr(
-                self,
-                "_emoji_images"
-            ):
-                self._emoji_images = []
-
-            if not hasattr(
-                self,
-                "_emoji_cache"
-            ):
-                self._emoji_cache = {}
-
-            if not hasattr(
-                self,
-                "_emoji_failed"
-            ):
-                self._emoji_failed = set()
-
             emoji_size = 16
-
-            cache_key = (
-                emoji,
-                emoji_size
-            )
-
-            cached = self._emoji_cache.get(
-                cache_key
-            )
+            cache_key = (emoji, emoji_size)
+            cached = self._emoji_cache.get(cache_key)
 
             if cached is not None:
-                self.place_emoji_image(
-                    cached
-                )
+                self.place_emoji_image(cached)
                 return
 
             if emoji in self._emoji_failed:
-                self.chat.insert(
-                    "end",
-                    emoji
-                )
+                self.chat.insert("render_pos", emoji)
                 return
 
             cache_dir = self.get_emoji_cache_dir()
 
             if cache_dir is None:
-                self._emoji_failed.add(
-                    emoji
-                )
-
-                self.chat.insert(
-                    "end",
-                    emoji
-                )
+                self._emoji_failed.add(emoji)
+                self.chat.insert("render_pos", emoji)
                 return
 
-            filename = (
-                self.get_emoji_codepoints(
-                    emoji
-                )
-                + ".png"
-            )
-
-            cache_path = (
-                cache_dir
-                / filename
-            )
+            cache_path = cache_dir / (self.get_emoji_codepoints(emoji) + ".png")
 
             if not cache_path.is_file():
-                url = self.get_emoji_image_url(
-                    emoji
-                )
+                if not self._emoji_network:
+                    self.chat.insert("render_pos", emoji)
+                    return
+
+                url = self.get_emoji_image_url(emoji)
 
                 if not url:
-                    self._emoji_failed.add(
-                        emoji
-                    )
-
-                    self.chat.insert(
-                        "end",
-                        emoji
-                    )
+                    self._emoji_failed.add(emoji)
+                    self.chat.insert("render_pos", emoji)
                     return
 
                 response = requests.get(
                     url,
                     timeout=4,
-                    headers={
-                        "User-Agent": "Zanel/1.0"
-                    }
+                    headers={"User-Agent": "Zanel/1.0"},
                 )
-
                 response.raise_for_status()
 
-                content_type = (
-                    response.headers.get(
-                        "Content-Type",
-                        ""
-                    ).lower()
-                )
-
-                if (
-                    "image" not in content_type
-                ):
-                    self._emoji_failed.add(
-                        emoji
-                    )
-
-                    self.chat.insert(
-                        "end",
-                        emoji
-                    )
+                if "image" not in response.headers.get("Content-Type", "").lower():
+                    self._emoji_failed.add(emoji)
+                    self.chat.insert("render_pos", emoji)
                     return
 
-                temporary_path = Path(
-                    str(cache_path)
-                    + ".tmp"
-                )
+                temporary_path = Path(str(cache_path) + ".tmp")
 
                 try:
-                    temporary_path.write_bytes(
-                        response.content
-                    )
-
-                    os.replace(
-                        temporary_path,
-                        cache_path
-                    )
+                    temporary_path.write_bytes(response.content)
+                    os.replace(temporary_path, cache_path)
                 finally:
                     try:
-                        temporary_path.unlink(
-                            missing_ok=True
-                        )
+                        temporary_path.unlink(missing_ok=True)
                     except OSError:
                         pass
 
-            image = Image.open(
-                cache_path
-            ).convert(
-                "RGBA"
-            )
+            image = Image.open(cache_path).convert("RGBA")
 
-            if (
-                image.width < 1
-                or image.height < 1
-            ):
-                self._emoji_failed.add(
-                    emoji
-                )
-
-                self.chat.insert(
-                    "end",
-                    emoji
-                )
+            if image.width < 1 or image.height < 1:
+                self._emoji_failed.add(emoji)
+                self.chat.insert("render_pos", emoji)
                 return
 
             image = image.resize(
-                (
-                    emoji_size,
-                    emoji_size,
-                ),
-                Image.Resampling.LANCZOS
+                (emoji_size, emoji_size),
+                Image.Resampling.LANCZOS,
             )
 
-            photo = ImageTk.PhotoImage(
-                image
-            )
-
-            self._emoji_cache[
-                cache_key
-            ] = photo
-
-            self._emoji_images.append(
-                photo
-            )
-
-            self.place_emoji_image(
-                photo
-            )
+            photo = ImageTk.PhotoImage(image)
+            self._emoji_cache[cache_key] = photo
+            self._emoji_images.append(photo)
+            self.place_emoji_image(photo)
 
         except Exception:
+            self._emoji_failed.add(emoji)
+
             try:
-                self._emoji_failed.add(
-                    emoji
-                )
-            except Exception:
-                pass
-
-            self.chat.insert(
-                "end",
-                emoji
-            )
-
-    def append_message(
-        self,
-        who,
-        text,
-    ):
-        try:
-            self.chat.configure(
-                state="normal"
-            )
-
-            text = self.format_message(
-                text
-            )
-
-            self.chat.insert(
-                "end",
-                f"{who}: "
-            )
-
-            pattern = re.compile(
-                r"\*\*(.+?)\*\*|\*(.+?)\*"
-            )
-
-            def insert_text(
-                value,
-                tag=None
-            ):
-                if not value:
-                    return
-
-                parts = self.split_emoji_text(
-                    value
-                )
-
-                for part_type, part in parts:
-                    if part_type == "emoji":
-                        self.insert_emoji(
-                            part
-                        )
-                    elif tag:
-                        self.chat.insert(
-                            "end",
-                            part,
-                            tag
-                        )
-                    else:
-                        self.chat.insert(
-                            "end",
-                            part
-                        )
-
-            position = 0
-
-            for match in pattern.finditer(
-                text
-            ):
-                if match.start() > position:
-                    insert_text(
-                        text[
-                            position:match.start()
-                        ]
-                    )
-
-                if match.group(1) is not None:
-                    insert_text(
-                        match.group(1),
-                        "bold"
-                    )
-                else:
-                    insert_text(
-                        match.group(2),
-                        "italic"
-                    )
-
-                position = match.end()
-
-            if position < len(text):
-                insert_text(
-                    text[position:]
-                )
-
-            self.chat.insert(
-                "end",
-                "\n\n"
-            )
-
-            self.chat.see(
-                "end"
-            )
-
-            self.chat.configure(
-                state="disabled"
-            )
-
-        except tk.TclError:
-            try:
-                self.chat.configure(
-                    state="disabled"
-                )
+                self.chat.insert("render_pos", emoji)
             except tk.TclError:
                 pass
-
-    def append_user_message(
-        self,
-        who,
-        text,
-        image_path,
-    ):
-        try:
-            self.chat.configure(
-                state="normal"
-            )
-
-            self.chat.insert(
-                "end",
-                f"{who}: "
-            )
-
-            if text:
-                text = self.format_message(
-                    text
-                )
-
-                pattern = re.compile(
-                    r"\*\*(.+?)\*\*|\*(.+?)\*"
-                )
-
-                def insert_text(
-                    value,
-                    tag=None
-                ):
-                    if not value:
-                        return
-
-                    parts = self.split_emoji_text(
-                        value
-                    )
-
-                    for part_type, part in parts:
-                        if part_type == "emoji":
-                            self.insert_emoji(
-                                part
-                            )
-                        elif tag:
-                            self.chat.insert(
-                                "end",
-                                part,
-                                tag
-                            )
-                        else:
-                            self.chat.insert(
-                                "end",
-                                part
-                            )
-
-                position = 0
-
-                for match in pattern.finditer(
-                    text
-                ):
-                    if match.start() > position:
-                        insert_text(
-                            text[
-                                position:match.start()
-                            ]
-                        )
-
-                    if match.group(1) is not None:
-                        insert_text(
-                            match.group(1),
-                            "bold"
-                        )
-                    else:
-                        insert_text(
-                            match.group(2),
-                            "italic"
-                        )
-
-                    position = match.end()
-
-                if position < len(text):
-                    insert_text(
-                        text[
-                            position:
-                        ]
-                    )
-
-            if image_path:
-                self.chat.insert(
-                    "end",
-                    "\n"
-                )
-
-                if os.path.isfile(
-                    image_path
-                ):
-                    try:
-                        image = Image.open(
-                            image_path
-                        ).convert(
-                            "RGB"
-                        )
-
-                        image.thumbnail(
-                            (280, 200),
-                            Image.Resampling.LANCZOS
-                        )
-
-                        photo = ImageTk.PhotoImage(
-                            image
-                        )
-
-                        image_label = tk.Label(
-                            self.chat,
-                            image=photo,
-                            bg="#101713",
-                            bd=0,
-                            highlightthickness=0
-                        )
-
-                        self.chat.window_create(
-                            "end",
-                            window=image_label
-                        )
-
-                        if not hasattr(
-                            self,
-                            "_chat_images"
-                        ):
-                            self._chat_images = []
-
-                        self._chat_images.append(
-                            (
-                                photo,
-                                image_label,
-                                image_path
-                            )
-                        )
-
-                    except Exception:
-                        self.chat.insert(
-                            "end",
-                            "[Unable to display image]"
-                        )
-
-            self.chat.insert(
-                "end",
-                "\n\n"
-            )
-
-            self.chat.see(
-                "end"
-            )
-
-            self.chat.configure(
-                state="disabled"
-            )
-
-        except tk.TclError:
-            try:
-                self.chat.configure(
-                    state="disabled"
-                )
-            except tk.TclError:
-                pass
-
-    def clear_chat(self):
-        try:
-            content = self.chat.get(
-                "1.0",
-                "end-1c"
-            ).strip()
-
-            if not content:
-                return
-
-            now = time.time()
-
-            if (
-                now - self.last_clear_time
-                < self.clear_cooldown
-            ):
-                return
-
-            self.last_clear_time = now
-
-            confirmed = messagebox.askyesno(
-                "Clear chat",
-                "Are you sure you want to clear all messages "
-                "from this window?",
-                parent=self.root,
-            )
-
-            if not confirmed:
-                self.last_clear_time = 0.0
-                return
-
-            self.chat.configure(
-                state="normal"
-            )
-
-            self.chat.delete(
-                "1.0",
-                "end"
-            )
-
-            self.chat.configure(
-                state="disabled"
-            )
-
-        except tk.TclError:
-            pass
 
     def message_pump(self):
         while self.running:
             try:
-                item = self.messages.get(
-                    timeout=0.1
-                )
+                item = self.messages.get(timeout=0.1)
             except queue.Empty:
                 continue
 
             try:
                 if item[0] == "text":
-                    self.root.after(
-                        0,
-                        self.append_message,
-                        item[1],
-                        item[2],
-                    )
+                    self.root.after(0, self.show_text, item[1], item[2])
+
+                elif item[0] == "chat_msg":
+                    self.root.after(0, self.handle_chat_message, item[1], item[2])
 
                 elif item[0] == "image":
-                    self.root.after(
-                        0,
-                        self.append_image,
-                        item[1],
-                        item[2],
-                    )
-
-                elif item[0] == "user_message":
-                    self.root.after(
-                        0,
-                        self.append_user_message,
-                        item[1],
-                        item[2],
-                        item[3],
-                    )
+                    self.root.after(0, self.append_image, item[1], item[2])
 
                 elif item[0] == "state":
-                    if (
-                        time.time()
-                        < getattr(
-                            self,
-                            "screenshot_status_until",
-                            0.0,
-                        )
-                    ):
+                    if time.time() < getattr(self, "screenshot_status_until", 0.0):
                         continue
 
                     self.root.after(
                         0,
-                        lambda text=item[1]:
-                        self.state.configure(
-                            text=text
-                        ),
+                        lambda text=item[1]: self.state.configure(text=text),
                     )
 
             except tk.TclError:
@@ -13641,7 +16923,7 @@ class ZanelApp:
                         bg=(
                             "#3a2028"
                             if self.mic_muted
-                            else "#17241D"
+                            else self.theme["mic"]
                         ),
                         state="normal",
                     )
@@ -13700,10 +16982,6 @@ class ZanelApp:
                     and not self.mic_muted
                     and not self.tts_busy
                 ):
-                    self.messages.put(
-                        ("text", "You", text)
-                    )
-
                     self.send_to_ai(text)
 
                 if self.running:
@@ -14080,11 +17358,11 @@ class ZanelApp:
         self.upload_button.configure(
             text="+",
             fg="#C8D8D0",
-            bg="#17211D",
+            bg=self.theme["upload"],
             activeforeground="#FFFFFF",
-            activebackground="#22312A",
-            highlightbackground="#293830",
-            highlightcolor="#5CFF9D",
+            activebackground=self.theme["button_hover"],
+            highlightbackground=self.theme["border"],
+            highlightcolor=self.theme["accent"],
         )
 
     def send_manual(self):
@@ -14093,179 +17371,151 @@ class ZanelApp:
         except tk.TclError:
             return
 
-        image_path = getattr(
-            self,
-            "attached_image_path",
-            None,
-        )
+        if text == INPUT_PLACEHOLDER:
+            text = ""
 
-        if not text and not image_path:
+        image_path = getattr(self, "attached_image_path", None)
+        paste = self.pending_paste
+
+        if not text and not image_path and not paste:
+            return
+
+        if self.chat_loading:
+            self.flash_state("Chat is loading…")
             return
 
         if not self.can_send_message():
             return
 
-        self.manual.delete(
-            0,
-            "end",
-        )
+        self.manual.delete(0, "end")
+        self.send_to_ai(text, image_path, paste)
+        self.clear_pending_paste()
 
-        self.messages.put(
-            (
-                "user_message",
-                "You",
-                text,
-                image_path,
-            )
-        )
-
-        self.send_to_ai(
-            text,
-            image_path,
-        )
-
-    def send_to_ai(
-        self,
-        text,
-        image_path=None,
-    ):
+    def send_to_ai(self, text, image_path=None, paste=None):
         if (
-            not text
-            and not image_path
-        ) or self.ai_busy:
+            (not text and not image_path and not paste)
+            or self.busy_chats
+            or self.chat_loading
+        ):
             return
 
-        self.ai_busy = True
+        chat_id = self.active_chat_id
+        meta = self.chat_store.get_chat(chat_id) if chat_id else None
+
+        if meta is None:
+            self.messages.put(("text", "System", "No active chat."))
+            return
+
+        text = (text or "")[:MAX_SERVER_MESSAGE_CHARS]
+        paste_text = None
+
+        if paste:
+            room = MAX_SERVER_MESSAGE_CHARS - len(text) - 2
+
+            if room > 0:
+                paste_text = paste[: min(room, PASTE_MAX_CHARS)]
+
+        if paste_text:
+            server_text = f"{text}\n\n{paste_text}" if text else paste_text
+        else:
+            server_text = text
+
+        thumbnail = None
+
+        if image_path:
+            thumbnail = self.chat_store.save_thumbnail(chat_id, image_path)
+
+        naming_text = None
+
+        if not meta.get("named"):
+            naming_text = (
+                text
+                or (paste_text[:300] if paste_text else "")
+                or "Screenshot"
+            )
+
+        self.busy_chats.add(chat_id)
+        self.chat_store.mark_server_used(chat_id)
+        self.refresh_sidebar_threadsafe()
+
+        self.post_chat(chat_id, "You", text, paste_text, thumbnail)
 
         threading.Thread(
             target=self.ai_thread,
-            args=(
-                text,
-                image_path,
-            ),
+            args=(chat_id, server_text, image_path, naming_text),
             daemon=True,
         ).start()
 
-    def _get_server_error(
-        self,
-        response=None,
-        service="AI",
-    ):
-        if response is None:
-            return f"{service} server is offline or unreachable."
+    @staticmethod
+    def make_preview(text, limit=PREVIEW_CHARS):
+        text = " ".join(str(text or "").split())
 
-        status = response.status_code
+        if len(text) <= limit:
+            return text
 
-        try:
-            data = response.json()
+        cut = text.rfind(" ", 0, limit)
 
-            if isinstance(data, dict):
-                error = data.get("error")
+        if cut < limit // 2:
+            cut = limit
 
-                if error:
-                    return str(error).strip()
+        return text[:cut].rstrip() + "…"
 
-                message = data.get("message")
-
-                if message:
-                    return str(message).strip()
-
-        except Exception:
-            pass
-
-        if status == 400:
-            return f"{service} request was invalid."
-
-        if status == 401:
-            return f"{service} API key was rejected."
-
-        if status == 403:
-            return f"{service} access was denied. Check your API key."
-
-        if status == 404:
-            return f"{service} endpoint was not found."
-
-        if status == 413:
-            return f"{service} request was too large."
-
-        if status == 429:
-            return f"{service} server rate limit reached. Try again later."
-
-        if status == 500:
-            return f"{service} server error."
-
-        if status == 502:
-            return f"{service} server returned a bad gateway response."
-
-        if status == 503:
-            return f"{service} server is unavailable."
-
-        if status == 504:
-            return f"{service} server timed out."
-
-        return f"{service} request failed with HTTP {status}."
+    def post_chat(self, chat_id, who, text, paste=None, image=None):
+        self.messages.put(
+            ("chat_msg", chat_id, make_entry(who, text, paste, image))
+        )
 
     def ai_thread(
         self,
+        chat_id,
         text,
         image_path=None,
+        naming_text=None,
     ):
-        self.messages.put(
-            (
-                "state",
-                "Zanel is thinking…",
-            )
-        )
+        self.messages.put(("state", "Zanel is thinking…"))
 
+        meta = self.chat_store.get_chat(chat_id)
         key = self.api_key
 
-        if not key:
+        if not key or meta is None:
             self.messages.put(
                 (
                     "text",
                     "System",
-                    "Set API_KEY or ZANEL_API_KEY first.",
+                    "API key missing." if not key else "This chat no longer exists.",
                 )
             )
 
-            self.ai_busy = False
+            self.busy_chats.discard(chat_id)
+            self.refresh_sidebar_threadsafe()
 
             self.messages.put(
-                (
-                    "state",
-                    "Mic Muted"
-                    if self.mic_muted
-                    else "Listening",
-                )
+                ("state", "Mic Muted" if self.mic_muted else "Listening")
             )
 
             return
 
-        feedback = self.last_action_feedback
+        feedback = self.last_action_feedback[:800]
         self.last_action_feedback = ""
+
+        message_text = text or "Please analyze this screenshot."
 
         payload = {
             "key": key,
             "model": "vision" if image_path else "normal",
-            "user_id": USER_ID,
-            "platform": PLATFORM,
-            "message": (
-                text
-                or "Please analyze this screenshot."
-            ),
+            "user_id": meta["user_id"],
+            "platform": meta["platform"],
+            "message": message_text,
             "bot_name": BOT_NAME,
             "system_prompt": SYSTEM_PROMPT.replace(
                 "This session's Feedback ID is:",
-                (
-                    "This session's Feedback ID is: "
-                    f"{self.feedback_id}"
-                ),
+                f"This session's Feedback ID is: {self.feedback_id}",
             ),
         }
 
         if feedback:
             payload["message"] = (
-                f"{text or 'Please analyze this screenshot.'}\n\n"
+                f"{message_text}\n\n"
                 f"[ACTION RESULT FROM PREVIOUS REQUEST]\n"
                 f"Feedback-ID: {self.feedback_id}\n"
                 f"{feedback}\n"
@@ -14281,35 +17531,22 @@ class ZanelApp:
                         "The attached screenshot could not be found."
                     )
 
-                extension = os.path.splitext(
-                    image_path
-                )[1].lower()
+                extension = os.path.splitext(image_path)[1].lower()
 
-                mimetype_map = {
+                mimetype = {
                     ".png": "image/png",
                     ".jpg": "image/jpeg",
                     ".jpeg": "image/jpeg",
-                }
-
-                mimetype = mimetype_map.get(
-                    extension
-                )
+                }.get(extension)
 
                 if not mimetype:
-                    raise ValueError(
-                        "Unsupported screenshot format."
-                    )
+                    raise ValueError("Unsupported screenshot format.")
 
-                with open(
-                    image_path,
-                    "rb",
-                ) as image_file:
+                with open(image_path, "rb") as image_file:
                     image_bytes = image_file.read()
 
                 if not image_bytes:
-                    raise ValueError(
-                        "The attached screenshot is empty."
-                    )
+                    raise ValueError("The attached screenshot is empty.")
 
                 if len(image_bytes) > 5 * 1024 * 1024:
                     raise ValueError(
@@ -14318,15 +17555,10 @@ class ZanelApp:
 
                 response = requests.post(
                     AI_URL,
-                    data={
-                        **payload,
-                        "model": "vision",
-                    },
+                    data={**payload, "model": "vision"},
                     files={
                         "image": (
-                            os.path.basename(
-                                image_path
-                            ),
+                            os.path.basename(image_path),
                             image_bytes,
                             mimetype,
                         )
@@ -14337,10 +17569,7 @@ class ZanelApp:
             else:
                 response = requests.post(
                     AI_URL,
-                    json={
-                        **payload,
-                        "model": "normal",
-                    },
+                    json={**payload, "model": "normal"},
                     timeout=140,
                 )
 
@@ -14349,52 +17578,57 @@ class ZanelApp:
             try:
                 data = response.json()
             except json.JSONDecodeError:
-                raise ValueError(
-                    "AI server returned invalid JSON."
-                )
+                raise ValueError("AI server returned invalid JSON.")
 
             if not isinstance(data, dict):
-                raise ValueError(
-                    "AI server returned an invalid response."
-                )
+                raise ValueError("AI server returned an invalid response.")
 
             if data.get("error"):
-                raise ValueError(
-                    str(data["error"])
-                )
+                raise ValueError(str(data["error"]))
 
-            reply = str(
-                data.get(
-                    "response",
-                    "No response generated",
-                )
-            )
+            reply = str(data.get("response", "No response generated"))
+            reply = self._clean_leaked_feedback(reply)
+            action = self._extract_action(reply)
+            spoken = self._remove_action_block(reply).strip()
 
-            reply = self._clean_leaked_feedback(
-                reply
-            )
-
-            action = self._extract_action(
-                reply
-            )
-
-            spoken = self._remove_action_block(
-                reply
-            ).strip()
+            tts_text = spoken
 
             if spoken:
-                self.messages.put(
-                    (
-                        "text",
-                        BOT_NAME,
-                        spoken,
-                    )
-                )
+                code_start = spoken.find("```")
 
-            if isinstance(
-                action,
-                dict,
-            ) and action:
+                if code_start != -1:
+                    visible = spoken[:code_start].strip()
+
+                    if len(visible) > PREVIEW_CHARS:
+                        visible = self.make_preview(visible)
+
+                    tts_text = visible or "I put the code in a long response."
+
+                    self.post_chat(
+                        chat_id,
+                        BOT_NAME,
+                        visible,
+                        spoken[code_start:LONG_REPLY_MAX_CHARS + code_start],
+                    )
+                elif (
+                    len(spoken) > LONG_REPLY_CHARS
+                    or spoken.count("\n") >= LONG_REPLY_LINES
+                ):
+                    tts_text = self.make_preview(spoken)
+
+                    self.post_chat(
+                        chat_id,
+                        BOT_NAME,
+                        tts_text,
+                        spoken[:LONG_REPLY_MAX_CHARS],
+                    )
+                else:
+                    self.post_chat(chat_id, BOT_NAME, spoken)
+
+            if naming_text:
+                self.name_chat_async(chat_id, naming_text)
+
+            if isinstance(action, dict) and action:
                 result = execute_action(
                     action,
                     self.root,
@@ -14403,132 +17637,170 @@ class ZanelApp:
                 )
 
                 self.last_action_feedback = (
-                    f"Action: "
-                    f"{action.get('action', 'unknown')}\n"
+                    f"Action: {action.get('action', 'unknown')}\n"
                     f"Result: {result}"
                 )
 
                 self.last_feedback_time = time.time()
 
-                if (
-                    result
-                    and result
-                    != "No local action requested."
-                ):
-                    self.messages.put(
-                        (
-                            "text",
-                            "Zanel action",
-                            result,
-                        )
-                    )
+                if result and result != "No local action requested.":
+                    self.post_chat(chat_id, "Zanel action", result)
 
             if (
-                spoken
+                tts_text
                 and self.running
                 and not self.silent_mode
+                and chat_id == self.active_chat_id
             ):
-                self._speak(
-                    spoken
-                )
+                self._speak(tts_text)
 
         except requests.HTTPError:
             self.messages.put(
-                (
-                    "text",
-                    "System",
-                    self._get_server_error(
-                        response,
-                        "AI",
-                    ),
-                )
+                ("text", "System", self._get_server_error(response, "AI"))
             )
 
         except requests.Timeout:
-            self.messages.put(
-                (
-                    "text",
-                    "System",
-                    "AI server timed out.",
-                )
-            )
+            self.messages.put(("text", "System", "AI server timed out."))
 
         except requests.ConnectionError:
             self.messages.put(
-                (
-                    "text",
-                    "System",
-                    "AI server is offline or unreachable.",
-                )
+                ("text", "System", "AI server is offline or unreachable.")
             )
 
         except requests.RequestException as exc:
-            error_message = str(
-                exc
-            ).strip()
-
             self.messages.put(
                 (
                     "text",
                     "System",
-                    error_message
-                    or "AI connection failed.",
+                    str(exc).strip() or "AI connection failed.",
                 )
             )
 
-        except FileNotFoundError as exc:
-            self.messages.put(
-                (
-                    "text",
-                    "System",
-                    str(exc),
-                )
-            )
-
-        except ValueError as exc:
-            self.messages.put(
-                (
-                    "text",
-                    "System",
-                    str(exc),
-                )
-            )
+        except (FileNotFoundError, ValueError) as exc:
+            self.messages.put(("text", "System", str(exc)))
 
         except Exception as exc:
-            error_message = str(
-                exc
-            ).strip()
-
             self.messages.put(
                 (
                     "text",
                     "System",
-                    error_message
-                    or "An unexpected AI error occurred.",
+                    str(exc).strip() or "An unexpected AI error occurred.",
                 )
             )
 
         finally:
             if image_path:
-                self.root.after(
-                    0,
-                    self.reset_screenshot_button,
-                )
+                try:
+                    self.root.after(0, self.reset_screenshot_button)
+                except tk.TclError:
+                    pass
 
-            self.ai_busy = False
+            self.busy_chats.discard(chat_id)
+            self.refresh_sidebar_threadsafe()
 
-            if (
-                self.running
-                and not self.tts_busy
-            ):
+            if self.running and not self.tts_busy:
                 self.messages.put(
-                    (
-                        "state",
-                        "Mic Muted"
-                        if self.mic_muted
-                        else "Listening",
-                    )
+                    ("state", "Mic Muted" if self.mic_muted else "Listening")
                 )
+
+    def name_chat_async(self, chat_id, source_text):
+        threading.Thread(
+            target=self._name_chat_worker,
+            args=(chat_id, source_text),
+            daemon=True,
+        ).start()
+
+    def _name_chat_worker(self, chat_id, source_text):
+        with self.name_lock:
+            meta = self.chat_store.get_chat(chat_id)
+
+            if meta is None or meta.get("named") or meta.get("anonymous"):
+                return
+
+            name = self.request_chat_name(source_text) or self.fallback_chat_name(
+                source_text
+            )
+
+            meta = self.chat_store.get_chat(chat_id)
+
+            if meta is None or meta.get("named"):
+                return
+
+            if self.chat_store.rename(chat_id, name, True):
+                self.refresh_sidebar_threadsafe()
+
+    def request_chat_name(self, source_text):
+        snippet = " ".join(str(source_text).split())[:400]
+
+        if not snippet or not self.api_key:
+            return ""
+
+        payload = {
+            "key": self.api_key,
+            "model": "small",
+            "user_id": "Un--set404",
+            "platform": "Un--set404",
+            "message": (
+                "Write a title of at most 5 words for a chat that starts with "
+                "this message. Reply with only the title.\n\n"
+                f"Message: {snippet}"
+            ),
+            "bot_name": BOT_NAME,
+            "system_prompt": (
+                "You write very short chat titles. Reply with only the title, "
+                "2 to 5 words, no quotes, no punctuation at the end."
+            ),
+        }
+
+        for attempt in range(2):
+            try:
+                response = requests.post(AI_URL, json=payload, timeout=60)
+            except requests.RequestException:
+                return ""
+
+            if response.status_code == 429 and attempt == 0:
+                time.sleep(3.3)
+                continue
+
+            if not response.ok:
+                return ""
+
+            try:
+                data = response.json()
+            except ValueError:
+                return ""
+
+            if not isinstance(data, dict) or data.get("error"):
+                return ""
+
+            return self.clean_chat_name(str(data.get("response") or ""))
+
+        return ""
+
+    @staticmethod
+    def clean_chat_name(raw):
+        raw = re.sub(r"<think>[\s\S]*?</think>", "", str(raw or ""))
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+
+        if not lines:
+            return ""
+
+        text = re.sub(r"(?i)^title\s*:\s*", "", lines[0])
+        text = text.strip(" \t\"'`*#_")
+        text = re.sub(r"[.!?:;,\-]+$", "", text).strip()
+        text = " ".join(text.split())
+
+        if not text or len(text.split()) > 8:
+            return ""
+
+        return text[:32].rstrip()
+
+    @staticmethod
+    def fallback_chat_name(source_text):
+        words = re.findall(r"\S+", str(source_text or ""))[:5]
+        name = " ".join(words)[:32].strip()
+
+        return name or DEFAULT_CHAT_NAME
 
     @staticmethod
     def _repair_json_strings(text):
@@ -14577,6 +17849,732 @@ class ZanelApp:
             result.append(char)
 
         return "".join(result)
+
+    @staticmethod
+    def shorten(text, limit):
+        text = str(text)
+
+        if len(text) <= limit:
+            return text
+
+        return text[: limit - 1] + "…"
+
+    def refresh_sidebar(self):
+        container = getattr(self, "chat_list", None)
+
+        if container is None:
+            return
+
+        try:
+            self.chat_canvas.itemconfigure(
+                self.chat_list_window,
+                state="hidden",
+            )
+
+            for child in container.winfo_children():
+                child.destroy()
+
+            self.sidebar_rows = {}
+            chats = self.chat_store.list_chats()
+            self.sidebar_count.configure(text=f"{len(chats)}/{MAX_CHATS}")
+
+            for meta in chats:
+                self.build_chat_row(container, meta)
+
+            container.update_idletasks()
+            self.chat_canvas.configure(
+                scrollregion=self.chat_canvas.bbox("all") or (0, 0, 0, 0)
+            )
+        except tk.TclError:
+            pass
+        finally:
+            try:
+                self.chat_canvas.itemconfigure(
+                    self.chat_list_window,
+                    state="normal",
+                )
+            except tk.TclError:
+                pass
+
+    def refresh_sidebar_threadsafe(self):
+        try:
+            self.root.after(0, self.refresh_sidebar)
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def relative_time(stamp, anonymous=False):
+        if anonymous:
+            return "Not saved"
+
+        try:
+            delta = max(0.0, time.time() - float(stamp))
+        except (TypeError, ValueError):
+            return ""
+
+        if delta < 60:
+            return "Just now"
+
+        if delta < 3600:
+            return f"{int(delta // 60)} min ago"
+
+        if delta < 86400:
+            return f"{int(delta // 3600)} h ago"
+
+        return f"{int(delta // 86400)} d ago"
+
+    def build_chat_row(self, container, meta):
+        chat_id = meta["id"]
+        active = chat_id == self.active_chat_id
+        loading = active and self.chat_loading
+        anonymous = bool(meta.get("anonymous"))
+        row_bg = self.theme["button"] if active else self.theme["panel"]
+        cursor = "watch" if self.chat_loading else "hand2"
+
+        row = tk.Frame(container, bg=row_bg, cursor=cursor)
+        row.pack(fill="x", pady=1, padx=2)
+
+        bar = tk.Frame(
+            row,
+            bg=self.theme["accent"] if active else row_bg,
+            width=3,
+        )
+        bar.pack(side="left", fill="y")
+
+        delete = tk.Button(
+            row,
+            text="×",
+            command=lambda cid=chat_id: self.delete_chat(cid),
+            fg="#8290A8" if active else "#56677A",
+            bg=row_bg,
+            activeforeground="white",
+            activebackground="#c43f52",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=8,
+            cursor="hand2",
+            font=("Segoe UI Symbol", 10),
+        )
+        delete.pack(side="right", fill="y")
+
+        rename = tk.Button(
+            row,
+            text="✎",
+            command=lambda cid=chat_id: self.open_rename_dialog(cid),
+            fg="#8290A8" if active else "#56677A",
+            bg=row_bg,
+            activeforeground="#071019",
+            activebackground=self.theme["accent"],
+            borderwidth=0,
+            highlightthickness=0,
+            padx=6,
+            cursor="hand2",
+            font=("Segoe UI Symbol", 10),
+        )
+        rename.pack(side="right", fill="y")
+
+        box = tk.Frame(row, bg=row_bg, cursor=cursor)
+        box.pack(side="left", fill="x", expand=True, padx=(8, 0), pady=6)
+
+        title = ("◌  " if anonymous else "") + meta["name"]
+
+        name_label = tk.Label(
+            box,
+            text=title,
+            anchor="w",
+            fg="#F2F6FF" if active else "#C8D8D0",
+            bg=row_bg,
+            cursor=cursor,
+            font=("Segoe UI Symbol", 9, "bold" if active else "normal"),
+        )
+        name_label.pack(fill="x")
+
+        title_font = tkfont.Font(
+            family="Segoe UI Symbol",
+            size=9,
+            weight="bold" if active else "normal",
+        )
+
+        def fit_title(event, label=name_label, full=title, font=title_font):
+            available = event.width - 4
+
+            if available <= 10:
+                return
+
+            if font.measure(full) <= available:
+                text = full
+            else:
+                text = full
+
+                while text and font.measure(text + "…") > available:
+                    text = text[:-1]
+
+                text = text.rstrip() + "…"
+
+            if label.cget("text") != text:
+                label.configure(text=text)
+
+        name_label.bind("<Configure>", fit_title)
+
+        subtitle = (
+            "Loading…"
+            if loading
+            else self.relative_time(meta.get("updated"), anonymous)
+        )
+
+        if chat_id in self.busy_chats and not loading:
+            subtitle = "Replying…"
+
+        sub_label = tk.Label(
+            box,
+            text=subtitle,
+            anchor="w",
+            fg="#8290A8",
+            bg=row_bg,
+            cursor=cursor,
+            font=("Segoe UI", 8),
+        )
+        sub_label.pack(fill="x")
+
+        for widget in (row, bar, box, name_label, sub_label):
+            widget.bind(
+                "<Button-1>",
+                lambda _event, cid=chat_id: self.switch_chat(cid),
+            )
+            widget.bind(
+                "<Enter>",
+                lambda _event, cid=chat_id: self.sidebar_hover(cid, True),
+            )
+            widget.bind(
+                "<Leave>",
+                lambda _event, cid=chat_id: self.sidebar_leave(cid),
+            )
+
+        self.sidebar_rows[chat_id] = {
+            "row": row,
+            "bar": bar,
+            "box": box,
+            "label": name_label,
+            "sub": sub_label,
+            "delete": delete,
+            "rename": rename,
+            "active": active,
+        }
+
+    def sidebar_hover(self, chat_id, inside):
+        entry = self.sidebar_rows.get(chat_id)
+
+        if not entry or entry["active"]:
+            return
+
+        color = self.theme["button_hover"] if inside else self.theme["panel"]
+
+        try:
+            for key in ("row", "bar", "box", "label", "sub", "delete", "rename"):
+                entry[key].configure(bg=color)
+
+            hover_fg = "#C8D8D0" if inside else "#56677A"
+            entry["delete"].configure(fg=hover_fg)
+            entry["rename"].configure(fg=hover_fg)
+        except tk.TclError:
+            pass
+
+    def sidebar_leave(self, chat_id):
+        entry = self.sidebar_rows.get(chat_id)
+
+        if not entry:
+            return
+
+        try:
+            row = entry["row"]
+            pointer_x, pointer_y = row.winfo_pointerxy()
+            target = row.winfo_containing(pointer_x, pointer_y)
+            inside = target is not None and (
+                target is row or str(target).startswith(str(row) + ".")
+            )
+        except (tk.TclError, KeyError):
+            inside = False
+
+        self.sidebar_hover(chat_id, inside)
+
+    def open_rename_dialog(self, chat_id):
+        meta = self.chat_store.get_chat(chat_id)
+
+        if meta is None:
+            return
+
+        remaining = RENAME_COOLDOWN - (time.time() - self.last_rename_time)
+
+        if remaining > 0:
+            self.flash_state(f"Wait {math.ceil(remaining)}s to rename again")
+            return
+
+        existing = self.rename_window
+
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.destroy()
+            except tk.TclError:
+                pass
+
+            self.rename_window = None
+
+        theme = self.theme
+        width = 300
+        height = 156
+
+        window = tk.Toplevel(self.root)
+        self.rename_window = window
+        window.overrideredirect(True)
+        window.configure(bg=theme["border"])
+
+        try:
+            window.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+
+        left, top, screen_w, screen_h = self.virtual_screen()
+
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - width) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - height) // 2
+        x = max(left + 4, min(x, left + screen_w - width - 4))
+        y = max(top + 4, min(y, top + screen_h - height - 4))
+
+        window.geometry(f"{width}x{height}+{x}+{y}")
+
+        inner = tk.Frame(window, bg=theme["panel"])
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        tk.Label(
+            inner,
+            text="Rename chat",
+            fg=theme["accent"],
+            bg=theme["panel"],
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w", padx=16, pady=(14, 8))
+
+        field = tk.Frame(
+            inner,
+            bg=theme["field"],
+            highlightthickness=1,
+            highlightbackground=theme["border"],
+            highlightcolor=theme["accent"],
+        )
+        field.pack(fill="x", padx=16)
+
+        name_var = tk.StringVar(value=meta["name"][:RENAME_MAX_CHARS])
+
+        entry = tk.Entry(
+            field,
+            textvariable=name_var,
+            bg=theme["field"],
+            fg="#E8F5ED",
+            insertbackground="white",
+            selectbackground=theme["accent"],
+            selectforeground="#071019",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Segoe UI", 10),
+        )
+        entry.pack(fill="x", padx=10, pady=8)
+
+        status = tk.Label(
+            inner,
+            text="",
+            fg="#FF6B7A",
+            bg=theme["panel"],
+            font=("Segoe UI", 8),
+        )
+        status.pack(anchor="w", padx=16, pady=(4, 0))
+
+        def limit_length(*_args):
+            value = name_var.get()
+
+            if len(value) > RENAME_MAX_CHARS:
+                name_var.set(value[:RENAME_MAX_CHARS])
+
+            try:
+                status.configure(text="")
+            except tk.TclError:
+                pass
+
+        name_var.trace_add("write", limit_length)
+
+        def close_dialog(_event=None):
+            if self.rename_window is window:
+                self.rename_window = None
+
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
+            return "break"
+
+        def save_name(_event=None):
+            value = " ".join(name_var.get().split())
+
+            if not value:
+                status.configure(text="Name can't be empty.")
+                return "break"
+
+            current = self.chat_store.get_chat(chat_id)
+
+            if current is not None and current["name"] != value:
+                self.chat_store.rename(chat_id, value, True)
+                self.last_rename_time = time.time()
+                self.refresh_sidebar()
+
+            close_dialog()
+            return "break"
+
+        buttons = tk.Frame(inner, bg=theme["panel"])
+        buttons.pack(side="bottom", fill="x", padx=16, pady=(0, 14))
+
+        tk.Button(
+            buttons,
+            text="Cancel",
+            command=close_dialog,
+            fg="#DDF8E8",
+            bg=theme["button"],
+            activeforeground="white",
+            activebackground=theme["button_hover"],
+            borderwidth=0,
+            relief="flat",
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+
+        tk.Button(
+            buttons,
+            text="Save",
+            command=save_name,
+            fg="#071019",
+            bg=theme["accent"],
+            activeforeground="#071019",
+            activebackground=theme["accent_hover"],
+            borderwidth=0,
+            relief="flat",
+            padx=18,
+            pady=6,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="right")
+
+        entry.bind("<Return>", save_name)
+        entry.bind("<Escape>", close_dialog)
+
+        def focus_entry():
+            try:
+                window.focus_force()
+                entry.focus_set()
+                entry.selection_range(0, "end")
+                entry.icursor("end")
+            except tk.TclError:
+                pass
+
+        window.after(60, focus_entry)
+
+    def init_chats(self):
+        chats = self.chat_store.list_chats()
+        target = None
+        last = self.chat_store.last_active
+
+        if last and any(meta["id"] == last for meta in chats):
+            target = last
+        elif chats:
+            target = chats[0]["id"]
+
+        if target is None:
+            meta = self.chat_store.create(False)
+            target = meta["id"] if meta else None
+
+        self.refresh_sidebar()
+
+        if target:
+            self.activate_chat(target, force=True)
+
+    def switch_chat(self, chat_id):
+        self.activate_chat(chat_id, force=False)
+
+    def new_chat(self, anonymous=False):
+        if self.chat_loading:
+            self.flash_state("Chat is loading…")
+            return
+
+        if anonymous:
+            existing = self.chat_store.anonymous_id()
+
+            if existing:
+                if existing != self.active_chat_id:
+                    self.switch_chat(existing)
+                else:
+                    self.flash_state("Only one anonymous chat allowed")
+
+                return
+
+        remaining = CHAT_CREATE_COOLDOWN - (time.time() - self.last_chat_create)
+
+        if remaining > 0:
+            self.flash_state(f"Wait {math.ceil(remaining)}s for a new chat")
+            return
+
+        if self.chat_store.count() >= MAX_CHATS:
+            self.flash_state(f"Max {MAX_CHATS} chats reached")
+            return
+
+        active = self.chat_store.get_chat(self.active_chat_id)
+
+        if (
+            active
+            and bool(active.get("anonymous")) == bool(anonymous)
+            and not self.chat_store.has_messages(self.active_chat_id)
+        ):
+            self.flash_state("This chat is already empty")
+            return
+
+        meta = self.chat_store.create(anonymous)
+
+        if meta is None:
+            self.flash_state(f"Max {MAX_CHATS} chats reached")
+            return
+
+        self.last_chat_create = time.time()
+        self.activate_chat(meta["id"], force=True)
+
+    def activate_chat(self, chat_id, force=False):
+        if self.chat_store.get_chat(chat_id) is None:
+            return False
+
+        if not force:
+            if self.chat_loading:
+                self.flash_state("Chat is still loading, please wait")
+                return False
+
+            if chat_id == self.active_chat_id:
+                return False
+
+            remaining = CHAT_SWITCH_COOLDOWN - (time.time() - self.last_chat_switch)
+
+            if remaining > 0:
+                self.flash_state(f"Wait {math.ceil(remaining)}s")
+                return False
+
+        self.chat_store.flush()
+        self.load_token += 1
+        token = self.load_token
+        self.last_chat_switch = time.time()
+        self.active_chat_id = chat_id
+        self.chat_store.set_last_active(chat_id)
+        self.chat_loading = True
+        self.deferred_entries = []
+        self.history_entries = []
+        self.history_start = 0
+        self.loading_older = False
+        self.reset_chat_view()
+        self.set_chat_visible(False)
+        self.show_loading_label(True)
+        self.refresh_sidebar()
+
+        threading.Thread(
+            target=self._read_history,
+            args=(token, chat_id),
+            daemon=True,
+        ).start()
+
+        return True
+
+    def _read_history(self, token, chat_id):
+        try:
+            entries = self.chat_store.messages(chat_id)
+        except Exception:
+            entries = []
+
+        try:
+            self.root.after(0, self.start_history_render, token, entries)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def start_history_render(self, token, entries):
+        if token != self.load_token or not self.running:
+            return
+
+        self.history_entries = entries
+        self.history_start = len(entries)
+
+        start = max(0, len(entries) - HISTORY_INITIAL)
+        self.load_initial(token, start, len(entries))
+
+    def load_initial(self, token, position, end):
+        if token != self.load_token or not self.running:
+            return
+
+        batch_end = min(end, position + HISTORY_BATCH)
+        self._emoji_network = False
+
+        try:
+            self.begin_render("end-1c")
+
+            for index in range(position, batch_end):
+                try:
+                    self.render_entry(self.history_entries[index], index)
+                except Exception:
+                    pass
+        except tk.TclError:
+            pass
+        finally:
+            try:
+                self.end_render()
+            except tk.TclError:
+                pass
+
+        try:
+            self.chat.see("end")
+
+            if batch_end < end:
+                self.root.after(8, self.load_initial, token, batch_end, end)
+                return
+        except tk.TclError:
+            return
+
+        self.finish_load(token, end)
+
+    def finish_load(self, token, end):
+        if token != self.load_token:
+            return
+
+        self.history_start = max(0, end - HISTORY_INITIAL)
+        self.chat_loading = False
+        self._emoji_network = True
+        self.set_chat_visible(True)
+        self.root.update_idletasks()
+        self.show_loading_label(False)
+
+        deferred = self.deferred_entries
+        self.deferred_entries = []
+
+        for entry in deferred:
+            self.display_entry(entry)
+
+        try:
+            self.chat.see("end")
+        except tk.TclError:
+            pass
+
+        self.refresh_sidebar()
+
+    def on_chat_yscroll(self, first, last):
+        try:
+            if (
+                not self.chat_loading
+                and not self.loading_older
+                and self.history_start > 0
+                and float(first) <= 0.02
+            ):
+                self.root.after_idle(self.load_older)
+        except (tk.TclError, ValueError):
+            pass
+
+    def load_older(self):
+        if self.chat_loading or self.loading_older or self.history_start <= 0:
+            return
+
+        self.loading_older = True
+        self._emoji_network = False
+
+        try:
+            new_start = max(0, self.history_start - HISTORY_PAGE)
+
+            self.chat.configure(state="normal")
+            self.chat.mark_set("older_anchor", "1.0")
+            self.chat.mark_gravity("older_anchor", "right")
+            self.begin_render("1.0")
+
+            for index in range(new_start, self.history_start):
+                try:
+                    self.render_entry(self.history_entries[index], index)
+                except Exception:
+                    pass
+
+            self.end_render()
+            self.history_start = new_start
+            self.chat.yview("older_anchor")
+            self.chat.mark_unset("older_anchor")
+        except tk.TclError:
+            pass
+        finally:
+            self._emoji_network = True
+            self.loading_older = False
+
+            try:
+                self.chat.configure(state="disabled")
+            except tk.TclError:
+                pass
+
+    def delete_chat(self, chat_id):
+        meta = self.chat_store.get_chat(chat_id)
+
+        if meta is None:
+            return
+
+        if self.chat_loading:
+            self.flash_state("Chat is loading…")
+            return
+
+        if chat_id in self.busy_chats:
+            self.flash_state("Wait for the reply")
+            return
+
+        remaining = CHAT_DELETE_COOLDOWN - (time.time() - self.last_chat_delete)
+
+        if remaining > 0:
+            self.flash_state(f"Wait {math.ceil(remaining)}s")
+            return
+
+        if self.chat_store.has_messages(chat_id):
+            if meta.get("anonymous"):
+                question = "Close this anonymous chat? It will be deleted permanently."
+            else:
+                question = (
+                    f"Delete \"{meta['name']}\"? "
+                    "Its messages will be removed permanently."
+                )
+
+            if not messagebox.askyesno(
+                "Delete chat",
+                question,
+                parent=self.root,
+            ):
+                return
+
+        self.last_chat_delete = time.time()
+        was_active = chat_id == self.active_chat_id
+
+        self.chat_store.delete(chat_id)
+        self.start_server_cleanup()
+
+        if not was_active:
+            self.refresh_sidebar()
+            return
+
+        self.active_chat_id = None
+        remaining_chats = self.chat_store.list_chats()
+
+        if remaining_chats:
+            target = remaining_chats[0]["id"]
+        else:
+            created = self.chat_store.create(False)
+            target = created["id"] if created else None
+
+        if target:
+            self.activate_chat(target, force=True)
+        else:
+            self.reset_chat_view()
+            self.refresh_sidebar()
 
     @staticmethod
     def _remove_trailing_json_commas(text):
@@ -15218,8 +19216,8 @@ class ZanelApp:
 
                     self.skip_button.pack(
                         side="right",
-                        padx=(0, 6),
-                        pady=8,
+                        padx=(8, 5),
+                        pady=0,
                     )
 
                     self.skip_visible = True
@@ -15244,8 +19242,8 @@ class ZanelApp:
             )
 
             self.skip_inner.configure(
-                bg="#0F1A15",
-                fg="#5CFF9D",
+                bg=self.theme["skip"],
+                fg=self.theme["accent"],
             )
 
         except (tk.TclError, AttributeError):
@@ -15256,11 +19254,11 @@ class ZanelApp:
 
         try:
             self.skip_button.configure(
-                bg="#5CFF9D",
+                bg=self.theme["accent"],
             )
 
             self.skip_inner.configure(
-                bg="#5CFF9D",
+                bg=self.theme["accent"],
                 fg="#071019",
             )
 
@@ -15276,8 +19274,8 @@ class ZanelApp:
             )
 
             self.skip_inner.configure(
-                bg="#0F1A15",
-                fg="#5CFF9D",
+                bg=self.theme["skip"],
+                fg=self.theme["accent"],
             )
 
         except (tk.TclError, AttributeError):

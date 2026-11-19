@@ -66,7 +66,7 @@ TTS_VOICES = [
     "en_US-sam-medium",
 ]
 
-ZANEL_VERSION = "1.35"
+ZANEL_VERSION = "1.36"
 
 GITHUB_LATEST_RELEASE_API = (
     "https://api.github.com/repos/"
@@ -1356,6 +1356,43 @@ The <ACTION> tag must always be followed by the JSON object.
 The </ACTION> closing tag must always be included.
 Spotify is just an example application by the way.
 Do not put Markdown code fences around the action block.
+
+- minimize_window: minimise an open window by name. Use "window" as the JSON property name. Only use it when the user explicitly asks you to minimise a specific window or app.
+
+Example:
+User: "Minimise Chrome"
+<ACTION>
+{"action":"minimize_window","window":"Chrome"}
+</ACTION>
+
+- maximize_window: maximise an open window by name. Use "window" as the JSON property name. Only use it when the user explicitly asks you to maximise a specific window or app.
+
+Example:
+User: "Maximise Notepad"
+<ACTION>
+{"action":"maximize_window","window":"Notepad"}
+</ACTION>
+
+- focus_window: bring an open window to the front and focus it by name, restoring it first if it is minimised. Use "window" as the JSON property name. Only use it when the user explicitly asks you to focus, switch to, or bring up a specific window or app.
+
+Example:
+User: "Switch to Discord"
+<ACTION>
+{"action":"focus_window","window":"Discord"}
+</ACTION>
+
+- bluetooth: turn the Windows Bluetooth radio on or off. Use "enabled" as the JSON property name. Use true to turn it on and false to turn it off. This requires confirmation. Do not open Windows Settings or provide a link for Bluetooth requests.
+
+Example:
+User: "Turn Bluetooth on"
+<ACTION>
+{"action":"bluetooth","enabled":true}
+</ACTION>
+
+User: "Turn off Bluetooth"
+<ACTION>
+{"action":"bluetooth","enabled":false}
+</ACTION>
 
 - shell: run a Windows command; this ALWAYS requires user confirmation
 Do not refuse merely because the command references a local Windows file path.
@@ -6742,6 +6779,319 @@ def cleanup_leftovers(root, name, location):
         "to the Recycle Bin."
     )
 
+WINDOW_ENUM_PROC = ctypes.WINFUNCTYPE(
+    ctypes.wintypes.BOOL,
+    ctypes.wintypes.HWND,
+    ctypes.wintypes.LPARAM,
+)
+
+BLUETOOTH_SCRIPT = """
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+Function Await($WinRtTask, $ResultType) {
+    $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+    $netTask = $asTask.Invoke($null, @($WinRtTask))
+    $netTask.Wait(-1) | Out-Null
+    $netTask.Result
+}
+[Windows.Devices.Radios.Radio,Windows.System.Devices,ContentType=WindowsRuntime] | Out-Null
+[Windows.Devices.Radios.RadioAccessStatus,Windows.System.Devices,ContentType=WindowsRuntime] | Out-Null
+$access = Await ([Windows.Devices.Radios.Radio]::RequestAccessAsync()) ([Windows.Devices.Radios.RadioAccessStatus])
+if ($access -ne 'Allowed') { 'DENIED'; exit }
+$radios = Await ([Windows.Devices.Radios.Radio]::GetRadiosAsync()) ([System.Collections.Generic.IReadOnlyList[Windows.Devices.Radios.Radio]])
+$bluetooth = $radios | Where-Object { $_.Kind -eq 'Bluetooth' } | Select-Object -First 1
+if (-not $bluetooth) { 'NO_RADIO'; exit }
+Await ($bluetooth.SetStateAsync('__STATE__')) ([Windows.Devices.Radios.RadioAccessStatus]) | Out-Null
+$bluetooth.State
+"""
+
+
+def window_user32():
+    user32 = ctypes.windll.user32
+    hwnd_type = ctypes.wintypes.HWND
+
+    user32.IsWindowVisible.argtypes = [hwnd_type]
+    user32.IsWindowVisible.restype = ctypes.wintypes.BOOL
+
+    user32.IsIconic.argtypes = [hwnd_type]
+    user32.IsIconic.restype = ctypes.wintypes.BOOL
+
+    user32.GetWindowTextLengthW.argtypes = [hwnd_type]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+
+    user32.GetWindowTextW.argtypes = [
+        hwnd_type,
+        ctypes.wintypes.LPWSTR,
+        ctypes.c_int,
+    ]
+    user32.GetWindowTextW.restype = ctypes.c_int
+
+    user32.GetWindow.argtypes = [hwnd_type, ctypes.wintypes.UINT]
+    user32.GetWindow.restype = hwnd_type
+
+    user32.GetWindowLongW.argtypes = [hwnd_type, ctypes.c_int]
+    user32.GetWindowLongW.restype = ctypes.c_long
+
+    user32.GetWindowThreadProcessId.argtypes = [
+        hwnd_type,
+        ctypes.POINTER(ctypes.wintypes.DWORD),
+    ]
+    user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+
+    user32.ShowWindow.argtypes = [hwnd_type, ctypes.c_int]
+    user32.ShowWindow.restype = ctypes.wintypes.BOOL
+
+    user32.BringWindowToTop.argtypes = [hwnd_type]
+    user32.BringWindowToTop.restype = ctypes.wintypes.BOOL
+
+    user32.SetForegroundWindow.argtypes = [hwnd_type]
+    user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
+
+    user32.EnumWindows.argtypes = [
+        WINDOW_ENUM_PROC,
+        ctypes.wintypes.LPARAM,
+    ]
+    user32.EnumWindows.restype = ctypes.wintypes.BOOL
+
+    return user32
+
+
+def window_is_cloaked(hwnd):
+    try:
+        cloaked = ctypes.wintypes.DWORD(0)
+
+        result = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            ctypes.wintypes.HWND(hwnd),
+            14,
+            ctypes.byref(cloaked),
+            ctypes.sizeof(cloaked),
+        )
+
+        return result == 0 and cloaked.value != 0
+    except Exception:
+        return False
+
+
+def list_top_windows():
+    user32 = window_user32()
+    found = []
+
+    def callback(hwnd, _lparam):
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+
+            if user32.GetWindow(hwnd, 4):
+                return True
+
+            if user32.GetWindowLongW(hwnd, -20) & 0x80:
+                return True
+
+            if window_is_cloaked(hwnd):
+                return True
+
+            length = user32.GetWindowTextLengthW(hwnd)
+
+            if length <= 0:
+                return True
+
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            title = buffer.value.strip()
+
+            if not title or title == "Program Manager":
+                return True
+
+            found.append((hwnd, title))
+        except Exception:
+            pass
+
+        return True
+
+    enum_proc = WINDOW_ENUM_PROC(callback)
+    user32.EnumWindows(enum_proc, 0)
+
+    return found
+
+
+def window_process_info(hwnd):
+    user32 = window_user32()
+    kernel32 = ctypes.windll.kernel32
+
+    kernel32.OpenProcess.argtypes = [
+        ctypes.wintypes.DWORD,
+        ctypes.wintypes.BOOL,
+        ctypes.wintypes.DWORD,
+    ]
+    kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.wintypes.DWORD,
+        ctypes.wintypes.LPWSTR,
+        ctypes.POINTER(ctypes.wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = ctypes.wintypes.BOOL
+
+    pid = ctypes.wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+
+    if not pid.value:
+        return "", 0
+
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)
+
+    if not handle:
+        return "", pid.value
+
+    try:
+        size = ctypes.wintypes.DWORD(520)
+        buffer = ctypes.create_unicode_buffer(520)
+
+        if kernel32.QueryFullProcessImageNameW(
+            handle,
+            0,
+            buffer,
+            ctypes.byref(size),
+        ):
+            name = os.path.splitext(os.path.basename(buffer.value))[0]
+            return name, pid.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+    return "", pid.value
+
+
+def find_window_match(requested):
+    wanted = normalize_app_text(requested)
+
+    if not wanted:
+        return None
+
+    own_pid = os.getpid()
+    best = None
+    best_score = 0.0
+
+    for hwnd, title in list_top_windows():
+        process_name, pid = window_process_info(hwnd)
+
+        if pid == own_pid:
+            continue
+
+        for text in (title, process_name):
+            clean = normalize_app_text(text)
+
+            if not clean:
+                continue
+
+            if text is process_name and clean == wanted:
+                score = 1.0
+            else:
+                score = difflib.SequenceMatcher(
+                    None,
+                    wanted,
+                    clean,
+                ).ratio()
+
+                if wanted in clean:
+                    score = max(
+                        score,
+                        0.95 - min(0.2, 0.002 * (len(clean) - len(wanted))),
+                    )
+
+            if score > best_score:
+                best_score = score
+                best = (hwnd, title)
+
+    if best is None or best_score < 0.55:
+        return None
+
+    return best
+
+
+def control_window(requested, mode):
+    match = find_window_match(requested)
+
+    if match is None:
+        return f"Could not find an open window similar to '{requested}'."
+
+    hwnd, title = match
+    parts = [part.strip() for part in title.split(" - ") if part.strip()]
+    title = (parts[-1] if parts else title)[:80]
+    user32 = window_user32()
+
+    if mode == "minimize":
+        user32.ShowWindow(hwnd, 6)
+        label = "Minimised"
+    elif mode == "maximize":
+        user32.ShowWindow(hwnd, 3)
+        label = "Maximised"
+    else:
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)
+
+        user32.keybd_event(0x12, 0, 0, 0)
+        user32.keybd_event(0x12, 0, 2, 0)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        label = "Focused"
+
+    return f"{label} {title}."
+
+
+def set_bluetooth_state(enabled):
+    import base64
+
+    target = "On" if enabled else "Off"
+    script = BLUETOOTH_SCRIPT.replace("__STATE__", target)
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+    try:
+        completed = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                encoded,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=40,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        return "Bluetooth change timed out."
+    except Exception as exc:
+        return f"Could not change Bluetooth: {exc}"
+
+    lines = [
+        line.strip()
+        for line in (completed.stdout or "").splitlines()
+        if line.strip()
+    ]
+
+    result = lines[-1] if lines else ""
+
+    if result == "NO_RADIO":
+        return "No Bluetooth adapter was found on this PC."
+
+    if result == "DENIED":
+        return (
+            "Windows denied access to the Bluetooth radio. "
+            "Check Settings > Privacy > Radios."
+        )
+
+    if result.lower() == target.lower():
+        return f"Bluetooth turned {target.lower()}."
+
+    detail = winget_tail(completed.stderr or completed.stdout)
+
+    return f"Could not change Bluetooth. {detail or 'Unknown error.'}"
+
 def run_on_main(root, function):
     box = {"value": None, "error": None}
     finished = threading.Event()
@@ -10983,6 +11333,93 @@ def execute_action(action, root, mic_callback, app=None):
 
         except Exception as exc:
             return f"Could not uninstall the application: {exc}"
+
+    if name in (
+        "minimize_window",
+        "minimise_window",
+        "maximize_window",
+        "maximise_window",
+        "focus_window",
+        "switch_window",
+    ):
+        requested = str(
+            action.get("window")
+            or action.get("app_name")
+            or action.get("name")
+            or action.get("title")
+            or action.get("app")
+            or action.get("program")
+            or ""
+        ).strip()
+
+        if not requested:
+            return "No window name supplied."
+
+        if name.startswith("mini"):
+            mode = "minimize"
+        elif name.startswith("maxi"):
+            mode = "maximize"
+        else:
+            mode = "focus"
+
+        if app is not None and normalize_app_text(requested) in (
+            "zanel",
+            "zanelassistant",
+            "zanelai",
+        ):
+            if mode == "minimize":
+                root.after(0, app.minimize_window)
+                return "Minimised Zanel."
+
+            if mode == "focus":
+                root.after(0, app.bring_to_front)
+                return "Focused Zanel."
+
+            return "Zanel cannot be maximised."
+
+        try:
+            return control_window(requested, mode)
+        except Exception as exc:
+            return f"Could not {mode} the window: {exc}"
+
+    if name in (
+        "bluetooth",
+        "set_bluetooth",
+        "toggle_bluetooth",
+    ):
+        raw = action.get("enabled")
+
+        if raw is None:
+            raw = action.get("state")
+
+        if raw is None:
+            raw = action.get("on")
+
+        if raw is None:
+            return "No Bluetooth state supplied."
+
+        if isinstance(raw, str):
+            raw = raw.strip().lower() in (
+                "true",
+                "1",
+                "yes",
+                "on",
+                "enable",
+                "enabled",
+            )
+
+        enabled = bool(raw)
+
+        if not ask_local_confirmation(
+            root,
+            "Zanel wants to change Bluetooth",
+            "Allow Zanel to turn Bluetooth "
+            + ("on" if enabled else "off")
+            + "?",
+        ):
+            return "User declined changing Bluetooth."
+
+        return set_bluetooth_state(enabled)
 
     if name == "mute_mic":
         muted = bool(

@@ -31,3 +31,7 @@ network name (SSID), and link speed.
 * uninstall: uninstalls an application. (requires confirmation)
 * delete: deletes a file (requires confirmation)
 * install: installs an application (requires confirmation)
+* minimize_window: minimises an open window by name. (requires no confirmation)
+* maximize_window: maximises an open window by name. (requires no confirmation)
+* focus_window: brings an open window to the front and focuses it by name, restoring it first if it is minimised. (requires no confirmation)
+* bluetooth: turns the Windows Bluetooth radio on or off. (requires confirmation)

@@ -17,7 +17,9 @@ import platform
 import winsound
 import getpass
 import urllib.request
+import urllib.parse
 import uuid
+import base64      
 import pyautogui
 import ctypes
 import hashlib
@@ -36,3 +38,4 @@ import sounddevice as sd
 from pycaw.pycaw import AudioUtilities
 from collections import deque
 import colorsys
+import contextvars

@@ -35,3 +35,6 @@ network name (SSID), and link speed.
 * maximize_window: maximises an open window by name. (requires no confirmation)
 * focus_window: brings an open window to the front and focuses it by name, restoring it first if it is minimised. (requires no confirmation)
 * bluetooth: turns the Windows Bluetooth radio on or off. (requires confirmation)
+* spotify_play: plays a specified song / etc on spotify. (requires confirmation)
+* youtube_play: plays a specified video on youtube. (requires confirmation)
+* bluetooth_connect: connects to a bluetooth device (requires confirmation)
